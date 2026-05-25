@@ -1870,8 +1870,9 @@
                 <div class="form-group"><label>Matières (séparées par virgule)</label><input type="text" id="nt-prof-matieres" placeholder="Ex : Maths, Physique"></div>
                 <div class="form-group"><label>Classes assignées (séparées par virgule)</label><input type="text" id="nt-prof-classes" placeholder="Ex : 3ème A, Tle SM"></div>
               </div>
-              <div style="display:flex;gap:10px;margin-top:14px">
+              <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
                 <button class="btn btn-success" onclick="ntSaveProf()">✓ Enregistrer</button>
+                <button class="btn btn-primary" onclick="ntImportProfsFromPersonnel()" title="Importer les enseignants depuis Gestion du Personnel">📥 Importer depuis Gestion du Personnel</button>
               </div>
             </div>
             <div class="table-wrap">
@@ -1892,7 +1893,10 @@
                   <select id="nt-cls-niveau"><option value="secondaire">Secondaire</option><option value="primaire">Primaire</option></select>
                 </div>
               </div>
-              <button class="btn btn-success" style="margin-top:10px" onclick="ntSaveClasse()">✓ Ajouter la classe</button>
+              <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
+                <button class="btn btn-success" onclick="ntSaveClasse()">✓ Ajouter la classe</button>
+                <button class="btn btn-primary" onclick="ntImportElevesFromGE()" title="Importer les élèves depuis Gestion des Élèves">📥 Importer depuis Gestion des Élèves</button>
+              </div>
             </div>
             <div id="nt-classes-list"></div>
           </div>
@@ -5507,6 +5511,8 @@ function geSaveEtudiant() {
   geSave(); geCloseModal('ge-modal-add-etud');
   geRenderEtudiants(); geRenderDashboard();
   updateWelcomeKPIs();
+  // Sync vers l'interface professeur
+  if (typeof window.geSyncEtudiantsToFirestore === 'function') window.geSyncEtudiantsToFirestore();
   // Rafraîchir la fiche si elle est active
   if(document.getElementById('ge-fiche-eleve')?.classList.contains('ge-active')) geFicheInitSelects();
 }
@@ -5545,6 +5551,7 @@ function geDeleteEtudiant(idx) {
   geEtudiants.splice(idx,1); geSave();
   geRenderEtudiants(); geRenderDashboard();
   updateWelcomeKPIs();
+  if (typeof window.geSyncEtudiantsToFirestore === 'function') window.geSyncEtudiantsToFirestore();
 }
 // ── MESSAGE WHATSAPP PARENT ────────────────────────────────
 function geBuildMsgParent(e) {
@@ -9742,4 +9749,141 @@ if (typeof window.gpShowPage === 'function') {
     if (id === 'gp-notes') { ntRenderProfs(); ntSwitchTab('profs'); }
   };
 }
-</script>
+
+// ── Import profs depuis Gestion du Personnel ──────────────
+window.ntImportProfsFromPersonnel = async function() {
+  try {
+    const personnelRaw = localStorage.getItem('mpua_personnel');
+    if (!personnelRaw) {
+      alert('Aucun personnel trouvé dans Gestion du Personnel. Veuillez d\'abord ajouter du personnel dans cet onglet.');
+      return;
+    }
+    const personnel = JSON.parse(personnelRaw);
+    // Filtrer uniquement les enseignants (contrat non-admin, ou tous si pas de filtre)
+    const enseignants = personnel.filter(p => p.nom && p.nom.trim());
+    if (!enseignants.length) {
+      alert('Aucun enseignant valide trouvé dans Gestion du Personnel.');
+      return;
+    }
+    // Lire les profs déjà enregistrés pour éviter les doublons
+    const snap = await getDocs(collection(db, 'notes_profs'));
+    const nomsExistants = new Set(snap.docs.map(d => (d.data().nom||'').trim().toLowerCase()));
+    let nbAjoutes = 0;
+    for (const p of enseignants) {
+      const nomTrimmed = (p.nom || '').trim();
+      if (!nomTrimmed || nomsExistants.has(nomTrimmed.toLowerCase())) continue;
+      const tel = (p.tel || p.telephone || p.phone || '').replace(/\D/g,'');
+      const email = p.email || '';
+      const niveau = (p.niveau || 'secondaire').toLowerCase().includes('primaire') ? 'primaire' : 'secondaire';
+      const matieres = p.spe || p.specialite || p.matiere || p.matieres || '';
+      const classes = p.classe || p.classes || '';
+      await addDoc(collection(db, 'notes_profs'), {
+        nom: nomTrimmed,
+        tel: tel || '000000000',
+        email,
+        niveau,
+        matieres,
+        classes,
+        importeDepuisPersonnel: true
+      });
+      nomsExistants.add(nomTrimmed.toLowerCase());
+      nbAjoutes++;
+    }
+    ntRenderProfs();
+    if (typeof showToast === 'function') {
+      showToast(nbAjoutes > 0
+        ? `✅ ${nbAjoutes} professeur(s) importé(s) depuis Gestion du Personnel.`
+        : '⚠️ Tous les enseignants étaient déjà présents. Aucun doublon ajouté.');
+    }
+  } catch(err) {
+    console.error('Erreur import personnel:', err);
+    alert('Erreur lors de l\'importation : ' + err.message);
+  }
+};
+
+// ── Import élèves depuis Gestion des Élèves ───────────────
+window.ntImportElevesFromGE = async function() {
+  try {
+    const raw = localStorage.getItem('ge_etudiants');
+    if (!raw) {
+      alert('Aucun élève trouvé dans Gestion des Élèves. Veuillez d\'abord inscrire des élèves dans cet onglet.');
+      return;
+    }
+    const etudiants = JSON.parse(raw);
+    if (!etudiants.length) {
+      alert('La liste des élèves est vide dans Gestion des Élèves.');
+      return;
+    }
+    // Regrouper par classe
+    const parClasse = {};
+    etudiants.forEach(e => {
+      const cl = (e.classe || e.option || 'Sans classe').trim();
+      if (!parClasse[cl]) parClasse[cl] = [];
+      const nomComplet = (`${e.nom || ''} ${e.prenom || ''}`).trim();
+      if (nomComplet) parClasse[cl].push(nomComplet);
+    });
+    // Lire les classes existantes dans Firestore
+    const snap = await getDocs(collection(db, 'notes_classes'));
+    const existantes = {}; // nom → docId
+    snap.forEach(d => { existantes[d.data().nom] = d.id; });
+    let nbClasses = 0, nbEleves = 0;
+    for (const [nom, eleves] of Object.entries(parClasse)) {
+      if (!eleves.length) continue;
+      if (existantes[nom]) {
+        // Fusionner sans doublons
+        const ref2 = doc(db, 'notes_classes', existantes[nom]);
+        const docSnap = await getDoc(ref2);
+        const elevesActuels = docSnap.exists() ? (docSnap.data().eleves || []) : [];
+        const elevesActuelsSet = new Set(elevesActuels.map(n => n.toLowerCase()));
+        const nouveaux = eleves.filter(n => !elevesActuelsSet.has(n.toLowerCase()));
+        if (nouveaux.length) {
+          const fusionnes = [...elevesActuels, ...nouveaux];
+          await setDoc(ref2, { ...docSnap.data(), eleves: fusionnes }, { merge: true });
+          nbEleves += nouveaux.length;
+        }
+      } else {
+        await addDoc(collection(db, 'notes_classes'), { nom, niveau: 'secondaire', eleves });
+        nbClasses++;
+        nbEleves += eleves.length;
+      }
+    }
+    ntRenderClasses();
+    if (typeof showToast === 'function') {
+      showToast(`✅ Import terminé : ${nbEleves} élève(s) ajouté(s) dans ${nbClasses} nouvelle(s) classe(s) + classes existantes mises à jour.`);
+    }
+  } catch(err) {
+    console.error('Erreur import élèves:', err);
+    alert('Erreur lors de l\'importation des élèves : ' + err.message);
+  }
+};
+
+// ── Sync geEtudiants → notes_classes Firestore ────────────
+// Regroupe les élèves par classe et met à jour Firestore
+window.geSyncEtudiantsToFirestore = async function() {
+  try {
+    const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
+    // Regrouper par classe
+    const parClasse = {};
+    etudiants.forEach(e => {
+      const cl = (e.classe || e.option || 'Sans classe').trim();
+      if (!parClasse[cl]) parClasse[cl] = [];
+      parClasse[cl].push(`${e.nom} ${e.prenom}`.trim());
+    });
+    // Lire les classes existantes dans Firestore
+    const snap = await getDocs(collection(db, 'notes_classes'));
+    const existantes = {}; // nom → docId
+    snap.forEach(d => { existantes[d.data().nom] = d.id; });
+    // Mettre à jour ou créer chaque classe
+    for (const [nom, eleves] of Object.entries(parClasse)) {
+      if (existantes[nom]) {
+        await setDoc(doc(db, 'notes_classes', existantes[nom]), { nom, eleves }, { merge: true });
+      } else {
+        await addDoc(collection(db, 'notes_classes'), { nom, niveau: 'secondaire', eleves });
+      }
+    }
+    if (typeof showToast === 'function') showToast('🔄 Élèves synchronisés avec l\'interface professeur.');
+  } catch(err) {
+    console.warn('Sync Firestore échouée (hors-ligne ?):', err);
+  }
+};
+
