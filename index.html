@@ -1592,7 +1592,10 @@
         <div class="section-title">👥 Registre du Personnel</div>
         <div class="section-sub">Gestion des agents et enseignants de l'établissement</div>
       </div>
-      <button class="btn btn-gold no-print" onclick="addPersonnel()">+ Ajouter un agent</button>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-gold no-print" onclick="addPersonnel()">+ Ajouter un agent</button>
+        <button class="btn btn-success no-print" onclick="gpEnvoyerTousLesLiens()" title="Envoyer le lien de saisie des notes à tous les enseignants">📲 Envoyer liens à tous les profs</button>
+      </div>
     </div>
 
     <!-- Formulaire ajout -->
@@ -1636,6 +1639,7 @@
             <th>Statut</th>
             <th>Sexe</th>
             <th class="no-print">Actions</th>
+            <th class="no-print">📲 Lien notes</th>
           </tr>
         </thead>
         <tbody id="personnel-tbody">
@@ -1841,97 +1845,52 @@
         <div class="container">
           <div class="section-header">
             <div>
-              <div class="section-title">📒 Notes &amp; Professeurs</div>
-              <div class="section-sub">Gestion des profs, classes, élèves et saisie des notes</div>
+              <div class="section-title">📊 Consulter les Notes</div>
+              <div class="section-sub">Notes saisies par les professeurs — résultats par classe et matière</div>
+            </div>
+            <button class="btn btn-primary no-print" onclick="ntLoadNotesSelectsFromGE()">🔄 Actualiser</button>
+          </div>
+
+          <!-- Filtres -->
+          <div class="card no-print" style="margin-bottom:20px">
+            <div class="form-grid">
+              <div class="form-group"><label>Classe</label>
+                <select id="nt-view-classe" onchange="ntLoadNotesView()">
+                  <option value="">— Choisir —</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Matière</label>
+                <select id="nt-view-matiere" onchange="ntLoadNotesView()">
+                  <option value="">— Choisir —</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Période</label>
+                <select id="nt-view-periode" onchange="ntLoadNotesView()">
+                  <option value="s1">1er Trimestre / Semestre</option>
+                  <option value="s2">2ème Trimestre / Semestre</option>
+                  <option value="s3">3ème Trimestre / Semestre</option>
+                </select>
+              </div>
             </div>
           </div>
 
-          <!-- Onglets admin -->
-          <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap">
-            <button id="ntab-profs" onclick="ntSwitchTab('profs')" class="btn btn-gold">👤 Profs</button>
-            <button id="ntab-classes" onclick="ntSwitchTab('classes')" class="btn btn-outline" style="color:var(--navy);border-color:var(--gray-200)">🏫 Classes &amp; Élèves</button>
-            <button id="ntab-notes" onclick="ntSwitchTab('notes')" class="btn btn-outline" style="color:var(--navy);border-color:var(--gray-200)">📊 Consulter les Notes</button>
+          <!-- Tableau des notes -->
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>N°</th><th>Élève</th><th>Classe</th><th>Note /20</th><th>Mention</th></tr></thead>
+              <tbody id="nt-notes-tbody">
+                <tr><td colspan="5" style="text-align:center;padding:32px;color:var(--gray-400)">Choisissez une classe et une matière pour afficher les notes.</td></tr>
+              </tbody>
+            </table>
           </div>
+          <div id="nt-notes-stats" style="margin-top:14px;font-size:13px;color:var(--navy);font-weight:600;padding:0 4px"></div>
 
-          <!-- Panel Profs -->
-          <div id="nt-panel-profs">
-            <div class="card no-print" style="margin-bottom:20px">
-              <strong style="font-family:'Playfair Display',serif;font-size:15px;color:var(--navy);display:block;margin-bottom:14px">➕ Ajouter un professeur</strong>
-              <div class="form-grid">
-                <div class="form-group"><label>Nom complet</label><input type="text" id="nt-prof-nom" placeholder="Ex : Mamadou Diallo"></div>
-                <div class="form-group"><label>Téléphone WhatsApp</label><input type="tel" id="nt-prof-tel" placeholder="Ex : 622000000"></div>
-                <div class="form-group"><label>Niveau</label>
-                  <select id="nt-prof-niveau">
-                    <option value="secondaire">Secondaire</option>
-                    <option value="primaire">Primaire</option>
-                  </select>
-                </div>
-                <div class="form-group"><label>Email (pour envoi du lien)</label><input type="email" id="nt-prof-email" placeholder="Ex : prof@ecole.gn"></div>
-                <div class="form-group"><label>Matières (séparées par virgule)</label><input type="text" id="nt-prof-matieres" placeholder="Ex : Maths, Physique"></div>
-                <div class="form-group"><label>Classes assignées (séparées par virgule)</label><input type="text" id="nt-prof-classes" placeholder="Ex : 3ème A, Tle SM"></div>
-              </div>
-              <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-                <button class="btn btn-success" onclick="ntSaveProf()">✓ Enregistrer</button>
-                <button class="btn btn-primary" onclick="ntImportProfsFromPersonnel()" title="Importer les enseignants depuis Gestion du Personnel">📥 Importer depuis Gestion du Personnel</button>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead><tr><th>Nom</th><th>Niveau</th><th>Matières</th><th>Classes</th><th>Lien WhatsApp</th><th>Lien Email</th><th>Actions</th></tr></thead>
-                <tbody id="nt-profs-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- Panel Classes & Élèves -->
-          <div id="nt-panel-classes" style="display:none">
-            <div class="card no-print" style="margin-bottom:20px">
-              <strong style="font-family:'Playfair Display',serif;font-size:15px;color:var(--navy);display:block;margin-bottom:14px">➕ Ajouter une classe</strong>
-              <div class="form-grid">
-                <div class="form-group"><label>Nom de la classe</label><input type="text" id="nt-cls-nom" placeholder="Ex : 3ème A, CE2 B"></div>
-                <div class="form-group"><label>Niveau</label>
-                  <select id="nt-cls-niveau"><option value="secondaire">Secondaire</option><option value="primaire">Primaire</option></select>
-                </div>
-              </div>
-              <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap">
-                <button class="btn btn-success" onclick="ntSaveClasse()">✓ Ajouter la classe</button>
-                <button class="btn btn-primary" onclick="ntImportElevesFromGE()" title="Importer les élèves depuis Gestion des Élèves">📥 Importer depuis Gestion des Élèves</button>
-              </div>
-            </div>
-            <div id="nt-classes-list"></div>
-          </div>
-
-          <!-- Panel Notes -->
-          <div id="nt-panel-notes" style="display:none">
-            <div class="card no-print" style="margin-bottom:16px">
-              <div class="form-grid">
-                <div class="form-group"><label>Classe</label>
-                  <select id="nt-view-classe" onchange="ntLoadNotesView()">
-                    <option value="">— Choisir —</option>
-                  </select>
-                </div>
-                <div class="form-group"><label>Matière</label>
-                  <select id="nt-view-matiere" onchange="ntLoadNotesView()">
-                    <option value="">— Choisir —</option>
-                  </select>
-                </div>
-                <div class="form-group"><label>Période</label>
-                  <select id="nt-view-periode" onchange="ntLoadNotesView()">
-                    <option value="T1">1er Trimestre</option>
-                    <option value="T2">2ème Trimestre</option>
-                    <option value="T3">3ème Trimestre</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead><tr><th>Élève</th><th>Note /20</th><th>Appréciation</th><th>Saisi par</th></tr></thead>
-                <tbody id="nt-notes-tbody"></tbody>
-              </table>
-            </div>
-            <div id="nt-notes-stats" style="margin-top:14px;font-size:13px;color:var(--navy);font-weight:600"></div>
-          </div>
+          <!-- Panneaux cachés gardés pour compatibilité JS -->
+          <div id="nt-panel-profs" style="display:none"></div>
+          <div id="nt-panel-classes" style="display:none"></div>
+          <div id="nt-panel-notes" style="display:none"></div>
+          <div id="nt-profs-tbody" style="display:none"></div>
+          <div id="nt-classes-list" style="display:none"></div>
 
         </div>
       </div>
@@ -4048,8 +4007,8 @@ function showTab(id) {
 <script>
 // ── STATE ──────────────────────────────────────────────────
 let personnel = JSON.parse(localStorage.getItem('mpua_personnel') || '[]');
-let presenceData = {};
-let apprecData = [];
+let presenceData = JSON.parse(localStorage.getItem('mpua_presences') || '{}');
+let apprecData = JSON.parse(localStorage.getItem('mpua_appreciations') || '[]');
 
 // ── NAVIGATION ─────────────────────────────────────────────
 function showPage(id, btn) {
@@ -4159,8 +4118,9 @@ function renderPersonnelTable() {
       <td>${a.email || '—'}</td>
       <td><span class="badge badge-${(a.contrat||'').toLowerCase()}">${a.contrat || '—'}</span></td>
       <td>${a.sexe || '—'}</td>
-      <td class="no-print">
+      <td class="no-print" style="white-space:nowrap">
         <button class="btn btn-danger" style="padding:5px 10px;font-size:12px" onclick="deletePersonnel(${a.id})">Suppr.</button>
+        ${(a.tel||a.email) ? `<button class="btn btn-success" style="padding:5px 10px;font-size:12px;margin-left:4px" onclick="gpEnvoyerLienProf(${a.id})" title="Envoyer le lien de saisie des notes">📲 Lien</button>` : ''}
       </td>
     </tr>`).join('');
 }
@@ -4197,6 +4157,395 @@ function syncPersonnelFiches() {
   });
   renderAppreciations();
 }
+
+// ══════════════════════════════════════════════════════════
+//  LIENS PROFS — Envoyer depuis Gestion du Personnel
+// ══════════════════════════════════════════════════════════
+
+// Génère le lien personnalisé d'un prof à partir de son ID dans mpua_personnel
+function gpGetLienProf(agentId) {
+  const pageUrl = window.location.href.split('?')[0];
+  return `${pageUrl}?prof_gp=${agentId}`;
+}
+
+// Envoyer le lien à un prof (WhatsApp ou Email selon ce qui est disponible)
+window.gpEnvoyerLienProf = function(agentId) {
+  const agent = personnel.find(a => a.id === agentId);
+  if (!agent) return;
+  const lien = gpGetLienProf(agentId);
+
+  // Construire les options d'envoi
+  const options = [];
+  const tel = (agent.tel || '').replace(/\D/g, '');
+  if (tel && tel.length >= 8) {
+    const wa = `https://wa.me/224${tel}?text=${encodeURIComponent('Bonjour ' + agent.nom + ', voici votre lien de saisie des notes :\n\n' + lien + '\n\nMerci.')}`;
+    options.push({ label: '📲 WhatsApp', url: wa });
+  }
+  if (agent.email) {
+    const emailHref = `mailto:${agent.email}?subject=${encodeURIComponent('Lien de saisie des notes')}&body=${encodeURIComponent('Bonjour ' + agent.nom + ',\n\nVeuillez trouver ci-dessous votre lien personnel pour la saisie des notes :\n\n' + lien + '\n\nCordialement.')}`;
+    options.push({ label: '📧 Email', url: emailHref });
+  }
+
+  if (!options.length) {
+    alert('Cet agent n\'a ni numéro WhatsApp ni email. Veuillez les renseigner dans le formulaire.');
+    return;
+  }
+
+  // Afficher un mini-modal de choix
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  modal.innerHTML = `
+    <div style="background:white;border-radius:14px;padding:28px 32px;max-width:400px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="font-family:'Playfair Display',serif;font-size:16px;font-weight:700;color:#0d2137;margin-bottom:6px;">📲 Envoyer le lien à</div>
+      <div style="font-size:14px;color:#5a4f45;margin-bottom:18px;font-weight:600;">${agent.nom}</div>
+      <div style="background:#faf8f4;border:1px solid #e8e4dd;border-radius:8px;padding:10px 14px;font-size:12px;color:#a09080;word-break:break-all;margin-bottom:18px;">${lien}</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+        ${options.map(o => `<a href="${o.url}" target="_blank" onclick="document.body.removeChild(document.body.lastChild)" style="display:flex;align-items:center;justify-content:center;gap:8px;background:${o.label.includes('WhatsApp')?'#25D366':'#1a73e8'};color:white;padding:11px 20px;border-radius:8px;font-size:14px;font-weight:700;text-decoration:none;">${o.label}</a>`).join('')}
+        <button onclick="navigator.clipboard&&navigator.clipboard.writeText('${lien}').then(()=>{this.textContent='✅ Copié !';setTimeout(()=>this.textContent='📋 Copier le lien',1500)})" style="background:#f4f2ee;border:1.5px solid #e8e4dd;color:#0d2137;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">📋 Copier le lien</button>
+      </div>
+      <button onclick="document.body.removeChild(this.closest('[style*=\"inset:0\"]'))" style="width:100%;background:#0d2137;color:white;border:none;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Fermer</button>
+    </div>`;
+  document.body.appendChild(modal);
+};
+
+// Envoyer les liens à tous les profs avec tel ou email
+window.gpEnvoyerTousLesLiens = function() {
+  const avecContact = personnel.filter(a => a.tel || a.email);
+  if (!avecContact.length) {
+    alert('Aucun agent n\'a de numéro WhatsApp ou d\'email renseigné.');
+    return;
+  }
+
+  const pageUrl = window.location.href.split('?')[0];
+  const lignes = avecContact.map(a => {
+    const lien = gpGetLienProf(a.id);
+    const tel = (a.tel || '').replace(/\D/g, '');
+    const wa = tel && tel.length >= 8
+      ? `<a href="https://wa.me/224${tel}?text=${encodeURIComponent('Bonjour ' + a.nom + ', voici votre lien de saisie des notes :\n\n' + lien)}" target="_blank" style="background:#25D366;color:white;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;margin-right:6px;">📲 WA</a>` : '';
+    const email = a.email
+      ? `<a href="mailto:${a.email}?subject=${encodeURIComponent('Lien saisie notes')}&body=${encodeURIComponent('Bonjour ' + a.nom + ',\n\nLien : ' + lien)}" style="background:#1a73e8;color:white;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;">📧 Email</a>` : '';
+    return `<tr style="border-bottom:1px solid #f4f2ee">
+      <td style="padding:8px 12px;font-weight:600;color:#0d2137">${a.nom}</td>
+      <td style="padding:8px 12px;font-size:12px;color:#5a4f45">${a.spe||'—'}</td>
+      <td style="padding:8px 12px">${wa}${email}</td>
+      <td style="padding:8px 12px"><button onclick="navigator.clipboard&&navigator.clipboard.writeText('${lien}').then(()=>{this.textContent='✅';setTimeout(()=>this.textContent='📋',1500)})" style="background:#f4f2ee;border:1px solid #e8e4dd;padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer;">📋</button></td>
+    </tr>`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  modal.innerHTML = `
+    <div style="background:white;border-radius:16px;padding:28px;max-width:700px;width:95%;max-height:80vh;overflow-y:auto;box-shadow:0 24px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+        <div style="font-family:'Playfair Display',serif;font-size:18px;font-weight:700;color:#0d2137;">📲 Liens de saisie — ${avecContact.length} prof(s)</div>
+        <button onclick="document.body.removeChild(this.closest('[style*=\"inset:0\"]'))" style="background:#f4f2ee;border:none;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:16px;">✕</button>
+      </div>
+      <div style="overflow-x:auto;border-radius:10px;border:1px solid #e8e4dd;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="background:#0d2137;color:white">
+            <th style="padding:10px 12px;text-align:left;font-size:11px;">NOM</th>
+            <th style="padding:10px 12px;text-align:left;font-size:11px;">SPÉCIALITÉ</th>
+            <th style="padding:10px 12px;text-align:left;font-size:11px;">ENVOYER</th>
+            <th style="padding:10px 12px;text-align:center;font-size:11px;">COPIER</th>
+          </tr></thead>
+          <tbody>${lignes}</tbody>
+        </table>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+};
+
+// ══════════════════════════════════════════════════════════
+//  INTERFACE PROF — Accès via lien ?prof_gp=ID
+//  Récupère les classes depuis ge_etudiants (localStorage)
+//  et synchronise les notes saisies vers ge_notes
+// ══════════════════════════════════════════════════════════
+(function gpProfInit() {
+  const params = new URLSearchParams(window.location.search);
+  const profGpId = params.get('prof_gp');
+  if (!profGpId) return; // Pas en mode prof
+
+  // Charger le personnel
+  const personnelData = JSON.parse(localStorage.getItem('mpua_personnel') || '[]');
+  const agent = personnelData.find(a => String(a.id) === String(profGpId));
+  if (!agent) {
+    document.body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0d2137;font-family:'DM Sans',sans-serif;color:white;flex-direction:column;gap:16px;"><div style="font-size:48px;">❌</div><div style="font-size:18px;font-weight:600;">Lien invalide ou expiré.</div><div style="font-size:13px;color:rgba(255,255,255,.6);">Contactez l'administration pour obtenir un nouveau lien.</div></div>`;
+    return;
+  }
+
+  // Charger les élèves depuis ge_etudiants
+  const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
+  // Charger les notes existantes
+  let geNotes = JSON.parse(localStorage.getItem('ge_notes') || '{}');
+  // Charger la config
+  const geConfig = JSON.parse(localStorage.getItem('ge_config') || '{}');
+
+  // Regrouper les élèves par classe
+  const parClasse = {};
+  etudiants.forEach(e => {
+    const cl = (e.classe || e.option || 'Sans classe').trim();
+    if (!parClasse[cl]) parClasse[cl] = [];
+    parClasse[cl].push(e);
+  });
+  const classes = Object.keys(parClasse).sort();
+
+  // Identifier les classes assignées au prof (depuis le champ classe/classes du personnel)
+  const classesProfRaw = (agent.classe || '').split(',').map(c => c.trim()).filter(Boolean);
+  // Si des classes sont assignées, ne montrer que celles-là ; sinon toutes
+  const classesVisibles = classesProfRaw.length
+    ? classes.filter(c => classesProfRaw.some(cp => c.toLowerCase().includes(cp.toLowerCase()) || cp.toLowerCase().includes(c.toLowerCase())))
+    : classes;
+
+  if (!classesVisibles.length && classesProfRaw.length) {
+    // Montrer toutes les classes si aucune correspondance trouvée
+    classesVisibles.push(...classes);
+  }
+
+  // Construire l'interface prof
+  document.body.innerHTML = '';
+  document.body.style.cssText = 'margin:0;font-family:"DM Sans",sans-serif;background:#f4f2ee;color:#1a1410;min-height:100vh;';
+
+  const annee = geConfig.annee || new Date().getFullYear() + '-' + (new Date().getFullYear()+1);
+  const etab = geConfig.nom || 'Établissement';
+
+  document.body.innerHTML = `
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <div style="background:linear-gradient(135deg,#0d2137,#163352);padding:18px 28px;border-bottom:3px solid #c9922a;color:white;display:flex;align-items:center;gap:16px;">
+    <div style="font-size:32px;">📒</div>
+    <div>
+      <div style="font-size:10px;color:#e8b84b;letter-spacing:.12em;text-transform:uppercase;">${etab} — ${annee}</div>
+      <div style="font-family:'Playfair Display',serif;font-size:20px;font-weight:700;">Saisie des Notes</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.7);margin-top:2px;">👤 ${agent.nom} ${agent.spe ? '· ' + agent.spe : ''}</div>
+    </div>
+  </div>
+
+  <div style="max-width:900px;margin:0 auto;padding:24px 20px;">
+
+    <!-- Sélecteurs -->
+    <div style="background:white;border-radius:14px;border:1px solid #e8e4dd;padding:20px;margin-bottom:20px;box-shadow:0 2px 12px rgba(0,0,0,.06);">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#5a4f45;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Classe</label>
+          <select id="gp-prof-classe" onchange="gpProfUpdateMatieres()" style="width:100%;padding:10px 14px;border:1.5px solid #e8e4dd;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:14px;outline:none;">
+            <option value="">— Choisir une classe —</option>
+            ${classesVisibles.map(c => `<option value="${c}">${c} (${(parClasse[c]||[]).length} élèves)</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#5a4f45;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Matière</label>
+          <input type="text" id="gp-prof-matiere" list="gp-prof-matieres-list" placeholder="Ex : Mathématiques" style="width:100%;padding:10px 14px;border:1.5px solid #e8e4dd;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:14px;outline:none;box-sizing:border-box;">
+          <datalist id="gp-prof-matieres-list"></datalist>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#5a4f45;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;">Période</label>
+          <select id="gp-prof-periode" style="width:100%;padding:10px 14px;border:1.5px solid #e8e4dd;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:14px;outline:none;">
+            <option value="s1">1er Trimestre / Semestre</option>
+            <option value="s2">2ème Trimestre / Semestre</option>
+            <option value="s3">3ème Trimestre / Semestre</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <button onclick="gpProfRenderTable()" style="background:#0d2137;color:white;border:none;padding:10px 24px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;">🔍 Charger les élèves</button>
+        <span id="gp-prof-niveau-badge" style="font-size:12px;font-weight:700;padding:6px 14px;border-radius:20px;background:#f4f2ee;color:#5a4f45;">Choisissez une classe</span>
+      </div>
+    </div>
+
+    <!-- Table notes -->
+    <div id="gp-prof-table-zone"></div>
+
+    <!-- Toast -->
+    <div id="gp-prof-toast" style="display:none;position:fixed;bottom:24px;right:24px;background:#0d2137;color:white;padding:14px 22px;border-radius:10px;font-size:14px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.3);border-left:4px solid #c9922a;z-index:9999;"></div>
+  </div>`;
+
+  // Stocker les données pour usage dans les fonctions
+  window._gpProfData = { agent, parClasse, geNotes, geConfig };
+
+  // Détecter si une classe est primaire (même logique que geIsPrimaire)
+  function gpIsPrimaire(classe) {
+    if (!classe) return false;
+    const c = classe.trim().toLowerCase();
+    if (/\b(cp[12]?|ce[12]?|cm[12]?)\b/i.test(c)) return true;
+    if (/\bcours\s*(préparatoire|elementaire|élémentaire|moyen)\b/i.test(c)) return true;
+    if (/^[1-6][eèêe]?m?e?\s*(è?re?|[eèê]me?)?\s*(ann[eé]e?|an\.?)?\s*[A-Za-z0-9\s\-]*$/i.test(c) && parseInt(c) >= 1 && parseInt(c) <= 6) return true;
+    if (/^(1[eèê]re?|[2-6][eèê]me?)\s*(ann[eé]e?)?/i.test(c) && !/\b(coll[eè]ge|lyc[eé]e|seconde|terminal|terminale|bac|bep|cap|ts|tg)\b/i.test(c)) return true;
+    return false;
+  }
+
+  // Remplir les matières selon le niveau de la classe sélectionnée
+  window.gpProfUpdateMatieres = function() {
+    const classe = document.getElementById('gp-prof-classe')?.value;
+    const matiereInput = document.getElementById('gp-prof-matiere');
+    const matiereDatalist = document.getElementById('gp-prof-matieres-list');
+    if (!matiereInput || !matiereDatalist) return;
+
+    const isPrim = gpIsPrimaire(classe);
+    const matieresPrim = ['Lecture','Écriture','Calcul','Éveil','Français','Morale & Civisme','EPS'];
+    const matieresSecond = ['Mathématiques','Français','Physique-Chimie','SVT','Histoire-Géographie','Anglais','Philosophie','EPS','Informatique','Économie'];
+
+    const liste = isPrim ? matieresPrim : matieresSecond;
+    matiereDatalist.innerHTML = liste.map(m => `<option value="${m}">`).join('');
+
+    // Badge niveau
+    const badge = document.getElementById('gp-prof-niveau-badge');
+    if (badge) {
+      badge.textContent = isPrim ? '🏫 Primaire — Notes sur 10' : '🏫 Secondaire — Notes sur 20';
+      badge.style.background = isPrim ? '#e8f4e8' : '#e8eef4';
+      badge.style.color = isPrim ? '#2d7a4f' : '#0d2137';
+    }
+  };
+
+  window.gpProfRenderTable = function() {
+    const classe = document.getElementById('gp-prof-classe').value;
+    const matiere = (document.getElementById('gp-prof-matiere').value || '').trim();
+    const periode = document.getElementById('gp-prof-periode').value;
+    const zone = document.getElementById('gp-prof-table-zone');
+    if (!classe) { zone.innerHTML = ''; return; }
+
+    const eleves = (window._gpProfData.parClasse[classe] || []);
+    if (!eleves.length) {
+      zone.innerHTML = `<div style="background:white;border-radius:14px;padding:32px;text-align:center;color:#a09080;">Aucun élève dans cette classe.</div>`;
+      return;
+    }
+
+    const isPrim = gpIsPrimaire(classe);
+    const noteMax = isPrim ? 10 : 20;
+    const seuil   = isPrim ? 5  : 10;
+
+    // Clé matière : pour primaire on préfixe "prim_"
+    let matiereKey = matiere ? matiere.toLowerCase().replace(/\s+/g,'_').replace(/[éèê]/g,'e').replace(/[àâ]/g,'a').replace(/[^a-z0-9_]/g,'') : 'matiere';
+    if (isPrim && matiereKey && !matiereKey.startsWith('prim_')) matiereKey = 'prim_' + matiereKey;
+
+    const periodeNum = parseInt(periode.replace('s',''));
+    const notes = window._gpProfData.geNotes;
+
+    zone.innerHTML = `
+      <div style="background:white;border-radius:14px;border:1px solid #e8e4dd;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.06);">
+        <div style="background:${isPrim?'#2d7a4f':'#0d2137'};color:white;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-weight:700;font-size:14px;">📋 ${classe} — ${matiere||'(matière non précisée)'} — Période ${periodeNum}</div>
+            <div style="font-size:11px;opacity:.75;margin-top:2px;">${isPrim?'🏫 Primaire — Notes sur 10':'🏫 Secondaire — Notes sur 20'}</div>
+          </div>
+          <button onclick="gpProfSaveNotes('${classe}','${matiereKey}','${matiere}',${periodeNum},${isPrim})" style="background:#c9922a;color:white;border:none;padding:9px 22px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;">✓ Enregistrer les notes</button>
+        </div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead>
+              <tr style="background:#f4f2ee;">
+                <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45;">N°</th>
+                <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45;">ÉLÈVE</th>
+                <th style="padding:10px 16px;text-align:center;font-size:11px;color:#5a4f45;">NOTE /${noteMax}</th>
+                <th style="padding:10px 16px;text-align:center;font-size:11px;color:#5a4f45;">STATUT</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${eleves.map((e, i) => {
+                const mat2 = e.matricule;
+                const noteActuelle = notes[mat2]?.['s'+periodeNum]?.[matiereKey] ?? '';
+                const couleur = noteActuelle !== '' ? (parseFloat(noteActuelle) >= seuil ? '#2d7a4f' : '#9b2335') : '#aaa';
+                const statut = noteActuelle !== '' ? (parseFloat(noteActuelle) >= seuil ? '✅' : '❌') : '—';
+                return `<tr style="border-top:1px solid #f4f2ee;">
+                  <td style="padding:10px 16px;color:#a09080;font-size:12px;">${i+1}</td>
+                  <td style="padding:10px 16px;font-weight:600;color:#0d2137;">${e.nom} ${e.prenom}</td>
+                  <td style="padding:8px 16px;text-align:center;">
+                    <input type="number" id="gpnote-${i}" data-matricule="${mat2}" min="0" max="${noteMax}" step="0.25" value="${noteActuelle}" placeholder="—"
+                      oninput="const v=parseFloat(this.value);if(!isNaN(v)){const s=document.getElementById('gpstat-${i}');s.textContent=v>=${seuil}?'✅':'❌';s.style.color=v>=${seuil}?'#2d7a4f':'#9b2335';if(v>${noteMax})this.value=${noteMax};if(v<0)this.value=0;}"
+                      style="width:75px;padding:7px 8px;border-radius:8px;border:1.5px solid #e8e4dd;text-align:center;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;outline:none;">
+                  </td>
+                  <td style="padding:10px 16px;text-align:center;font-size:16px;color:${couleur}" id="gpstat-${i}">${statut}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div style="padding:14px 20px;border-top:1px solid #f4f2ee;display:flex;justify-content:flex-end;">
+          <button onclick="gpProfSaveNotes('${classe}','${matiereKey}','${matiere}',${periodeNum},${isPrim})" style="background:#c9922a;color:white;border:none;padding:10px 28px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;cursor:pointer;">✓ Enregistrer les notes</button>
+        </div>
+      </div>`;
+  };
+
+  window.gpProfSaveNotes = function(classe, matiereKey, matiereLabel, periodeNum, isPrim) {
+    const eleves = window._gpProfData.parClasse[classe] || [];
+    const notes = window._gpProfData.geNotes;
+    const periodeStr = 's' + periodeNum;
+    const noteMax = isPrim ? 10 : 20;
+
+    eleves.forEach((e, i) => {
+      const mat2 = e.matricule;
+      const input = document.getElementById('gpnote-' + i);
+      if (!input) return;
+      const val = input.value;
+      if (!notes[mat2]) notes[mat2] = {};
+      if (!notes[mat2][periodeStr]) notes[mat2][periodeStr] = {};
+
+      if (val !== '' && val !== null) {
+        const v = Math.min(noteMax, Math.max(0, parseFloat(val)));
+        notes[mat2][periodeStr][matiereKey] = v;
+        input.value = v;
+      }
+    });
+
+    window._gpProfData.geNotes = notes;
+    localStorage.setItem('ge_notes', JSON.stringify(notes));
+
+    // Sync vers ge_data
+    try {
+      const geData = JSON.parse(localStorage.getItem('ge_data') || '{}');
+      if (!geData.notes) geData.notes = {};
+      eleves.forEach((e, i) => {
+        const mat2 = e.matricule;
+        const input = document.getElementById('gpnote-' + i);
+        if (!input || input.value === '') return;
+        if (!geData.notes[mat2]) geData.notes[mat2] = {};
+        if (!geData.notes[mat2][periodeStr]) geData.notes[mat2][periodeStr] = {};
+        geData.notes[mat2][periodeStr][matiereKey] = parseFloat(input.value);
+      });
+      // Ajouter la matière dans la bonne liste (primaire ou secondaire)
+      const listeKey = isPrim ? 'matieres_primaire' : 'matieres';
+      if (!geData[listeKey]) geData[listeKey] = [];
+      if (matiereKey && !geData[listeKey].includes(matiereKey)) {
+        geData[listeKey].push(matiereKey);
+        if (!geData.matiere_labels) geData.matiere_labels = {};
+        geData.matiere_labels[matiereKey] = matiereLabel || matiereKey;
+        if (!geData.coefficients) geData.coefficients = {};
+        geData.coefficients[matiereKey] = 1;
+      }
+      localStorage.setItem('ge_data', JSON.stringify(geData));
+
+      // Sync dans ge_matieres / ge_matieres_primaire via localStorage uniquement
+      // (GE_MATIERES/GE_MATIERES_PRIMAIRE n'existent pas dans le contexte de l'interface prof)
+      const lsKeyMat = isPrim ? 'ge_matieres_primaire' : 'ge_matieres';
+      try {
+        const matList = JSON.parse(localStorage.getItem(lsKeyMat) || '[]');
+        if (matiereKey && !matList.includes(matiereKey)) {
+          matList.push(matiereKey);
+          localStorage.setItem(lsKeyMat, JSON.stringify(matList));
+        }
+      } catch(e3) {}
+
+      // Labels lisibles dans ge_matiere_labels
+      try {
+        const labels = JSON.parse(localStorage.getItem('ge_matiere_labels') || '{}');
+        if (matiereKey && !labels[matiereKey]) {
+          labels[matiereKey] = matiereLabel || matiereKey.replace(/^prim_/,'').replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase());
+          localStorage.setItem('ge_matiere_labels', JSON.stringify(labels));
+        }
+      } catch(e4) {}
+    } catch(err) { console.warn('Erreur sync ge_data:', err); }
+
+    const toast = document.getElementById('gp-prof-toast');
+    if (toast) {
+      toast.textContent = '✅ Notes enregistrées avec succès !';
+      toast.style.display = '';
+      setTimeout(() => toast.style.display = 'none', 3000);
+    }
+  };
+
+  // Pré-charger si une classe est déjà sélectionnée
+  if (classesVisibles.length === 1) {
+    document.getElementById('gp-prof-classe').value = classesVisibles[0];
+  }
+})();
 
 
 function getDaysInMonth(month, year) {
@@ -4254,6 +4603,7 @@ function togglePresence(agentId, annee, mois, day, nextVal) {
   const key = `${agentId}-${annee}-${mois}`;
   if (!presenceData[key]) presenceData[key] = {};
   presenceData[key][day] = nextVal;
+  localStorage.setItem('mpua_presences', JSON.stringify(presenceData));
   renderPresence();
 }
 
@@ -4307,6 +4657,7 @@ function updateDashboard() {
 function populateAppreciations() {
   if (!personnel.length) { showToast('⚠️ Aucun agent dans le registre.'); return; }
   apprecData = personnel.map(a => ({ id: a.id, nom: a.nom, spe: a.spe, grade: a.grade, s1:0, s2:0, s3:0, s4:0, s5:0, obs:'' }));
+  localStorage.setItem('mpua_appreciations', JSON.stringify(apprecData));
   renderAppreciations();
   showToast('✅ Liste chargée depuis le registre.');
 }
@@ -4324,14 +4675,14 @@ function renderAppreciations() {
       : total >= 60 ? '<span class="badge badge-contractuel">Bien</span>'
       : total >= 40 ? '<span class="badge badge-vacataire">Assez Bien</span>'
       : '<span class="badge badge-stagiaire">Insuffisant</span>';
-    const inp = (field, max) => `<input type="number" min="0" max="${max}" value="${a[field]||0}" onchange="apprecData[${i}].${field}=+this.value;renderAppreciations()" style="width:52px;text-align:center;border:1.5px solid var(--gray-200);border-radius:6px;padding:5px;font-size:13px">`;
+    const inp = (field, max) => `<input type="number" min="0" max="${max}" value="${a[field]||0}" onchange="apprecData[${i}].${field}=+this.value;localStorage.setItem('mpua_appreciations',JSON.stringify(apprecData));renderAppreciations()" style="width:52px;text-align:center;border:1.5px solid var(--gray-200);border-radius:6px;padding:5px;font-size:13px">`;
     return `<tr>
       <td>${i+1}</td><td>${a.nom}</td><td>${a.spe||'—'}</td>
       <td>${inp('s1',20)}</td><td>${inp('s2',20)}</td><td>${inp('s3',20)}</td><td>${inp('s4',20)}</td><td>${inp('s5',20)}</td>
       <td><strong style="color:var(--navy);font-size:16px">${total}</strong></td>
       <td>${mention}</td>
-      <td><input type="text" value="${a.obs}" onchange="apprecData[${i}].obs=this.value" placeholder="…" style="border:1.5px solid var(--gray-200);border-radius:6px;padding:5px 8px;font-size:12px;width:100px"></td>
-      <td class="no-print"><button class="btn btn-danger" style="padding:5px 10px;font-size:12px" onclick="apprecData.splice(${i},1);renderAppreciations()">Suppr.</button></td>
+      <td><input type="text" value="${a.obs}" onchange="apprecData[${i}].obs=this.value;localStorage.setItem('mpua_appreciations',JSON.stringify(apprecData))" placeholder="…" style="border:1.5px solid var(--gray-200);border-radius:6px;padding:5px 8px;font-size:12px;width:100px"></td>
+      <td class="no-print"><button class="btn btn-danger" style="padding:5px 10px;font-size:12px" onclick="apprecData.splice(${i},1);localStorage.setItem('mpua_appreciations',JSON.stringify(apprecData));renderAppreciations()">Suppr.</button></td>
     </tr>`;
   }).join('');
 }
@@ -5397,6 +5748,57 @@ function geSave() {
   } catch(err) {}
 }
 
+// ── Sync automatique : matières saisies par les profs → GE_MATIERES ──
+// Quand un prof saisit une note via son lien, la matière est enregistrée
+// dans ge_notes. Au chargement de Gestion des Élèves, on s'assure que
+// toutes les matières présentes dans ge_notes sont bien dans GE_MATIERES.
+function geSyncMatieresDepuisNotes() {
+  try {
+    const notesRaw = localStorage.getItem('ge_notes');
+    if (!notesRaw) return;
+    const notes = JSON.parse(notesRaw);
+    let modifie = false;
+    Object.values(notes).forEach(periodes => {
+      if (!periodes || typeof periodes !== 'object') return;
+      Object.values(periodes).forEach(matiereMap => {
+        if (!matiereMap || typeof matiereMap !== 'object') return;
+        Object.keys(matiereMap).forEach(key => {
+          const isPrimKey = key.startsWith('prim_');
+          // Ajouter dans la bonne liste selon le préfixe
+          if (isPrimKey) {
+            if (!GE_MATIERES_PRIMAIRE.includes(key)) {
+              GE_MATIERES_PRIMAIRE.push(key);
+              modifie = true;
+            }
+          } else {
+            if (!GE_MATIERES.includes(key)) {
+              GE_MATIERES.push(key);
+              if (!GE_COEFFICIENTS[key]) GE_COEFFICIENTS[key] = 1;
+              modifie = true;
+            }
+          }
+          // Label lisible
+          try {
+            if (typeof GE_MATIERE_LABELS !== 'undefined' && !GE_MATIERE_LABELS[key]) {
+              // Priorité : ge_matiere_labels → ge_data → clé formatée
+              const labels = JSON.parse(localStorage.getItem('ge_matiere_labels') || '{}');
+              const gd = JSON.parse(localStorage.getItem('ge_data') || '{}');
+              GE_MATIERE_LABELS[key] = labels[key]
+                || (gd.matiere_labels && gd.matiere_labels[key])
+                || key.replace(/^prim_/,'').replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase());
+            }
+          } catch(e2) {}
+        });
+      });
+    });
+    if (modifie) {
+      localStorage.setItem('ge_matieres', JSON.stringify(GE_MATIERES));
+      localStorage.setItem('ge_matieres_primaire', JSON.stringify(GE_MATIERES_PRIMAIRE));
+      localStorage.setItem('ge_coefficients', JSON.stringify(GE_COEFFICIENTS));
+    }
+  } catch(err) { console.warn('geSyncMatieresDepuisNotes:', err); }
+}
+
 // ── GE NAVIGATION ─────────────────────────────────────────
 function geShowPage(id, navEl) {
   document.querySelectorAll('.ge-page').forEach(p=>p.classList.remove('ge-active'));
@@ -5645,7 +6047,7 @@ function geRenderEtudiants() {
       <td>
         <button class="ge-btn ge-btn-ghost" style="padding:5px 10px;font-size:0.78rem;" onclick="geEditEtudiant(${globalIdx})">✏️</button>
         <button class="ge-btn ge-btn-danger" style="padding:5px 10px;font-size:0.78rem;" onclick="geDeleteEtudiant(${globalIdx})">🗑️</button>
-        ${e.telTuteur ? `<a href="https://wa.me/${e.telTuteur.replace(/\D/g,'')}?text=${encodeURIComponent(geBuildMsgParent(e))}" target="_blank" class="ge-btn" style="padding:5px 10px;font-size:0.78rem;background:#25D366;color:white;text-decoration:none;border-radius:6px;">📲</a>` : ''}
+        ${e.telTuteur ? `<a href="https://wa.me/${(function(t){t=t.replace(/\D/g,'');if(t.startsWith('00'))t=t.slice(2);if(t.startsWith('224'))return t;if(t.startsWith('0'))t=t.slice(1);return '224'+t;})(e.telTuteur)}?text=${encodeURIComponent(geBuildMsgParent(e))}" target="_blank" class="ge-btn" style="padding:5px 10px;font-size:0.78rem;background:#25D366;color:white;text-decoration:none;border-radius:6px;">📲</a>` : ''}
       </td>
     </tr>`;
   }).join(''); }
@@ -7561,6 +7963,7 @@ function _getEnteteExcelRows(titre, nbCols) {
 }
 
 geLoad();
+geSyncMatieresDepuisNotes(); // Sync les matières saisies par les profs → GE_MATIERES
 
 // ── MENU EXPORT EXCEL ──────────────────────────────────────
 function toggleExcelMenu(e) {
@@ -9683,62 +10086,110 @@ window.ntDeleteClasse = async function(id) {
   ntRenderClasses();
 };
 
-// ── CONSULTER LES NOTES ───────────────────────────────────
-async function ntLoadNotesSelects() {
-  const [clsSnap, profSnap] = await Promise.all([
-    getDocs(collection(db, 'notes_classes')),
-    getDocs(collection(db, 'notes_profs'))
-  ]);
+// ── CONSULTER LES NOTES (depuis ge_notes localStorage) ───
+function ntLoadNotesSelectsFromGE() {
+  const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
+  const geNotes   = JSON.parse(localStorage.getItem('ge_notes') || '{}');
+
   const clsSel = document.getElementById('nt-view-classe');
   const matSel = document.getElementById('nt-view-matiere');
-  if (!clsSel||!matSel) return;
-  clsSel.innerHTML = '<option value="">— Choisir —</option>';
-  clsSnap.forEach(d => { clsSel.innerHTML += `<option value="${d.data().nom}">${d.data().nom}</option>`; });
+  if (!clsSel || !matSel) return;
+
+  // Classes depuis ge_etudiants
+  const classes = [...new Set(etudiants.map(e => (e.classe || e.option || '').trim()).filter(Boolean))].sort();
+  clsSel.innerHTML = '<option value="">— Choisir —</option>' + classes.map(c => `<option value="${c}">${c}</option>`).join('');
+
+  // Matières depuis ge_notes (toutes les clés de matières présentes)
   const mats = new Set();
-  profSnap.forEach(d => { if (d.data().matieres) d.data().matieres.split(',').map(m=>m.trim()).forEach(m=>mats.add(m)); });
-  matSel.innerHTML = '<option value="">— Choisir —</option>';
-  mats.forEach(m => { matSel.innerHTML += `<option value="${m}">${m}</option>`; });
+  Object.values(geNotes).forEach(periodes => {
+    if (!periodes) return;
+    Object.values(periodes).forEach(matiereMap => {
+      if (!matiereMap) return;
+      Object.keys(matiereMap).forEach(m => mats.add(m));
+    });
+  });
+  // Aussi depuis GE_MATIERES si disponible
+  if (typeof GE_MATIERES !== 'undefined') GE_MATIERES.forEach(m => mats.add(m));
+  // Labels lisibles
+  const getLabel = m => {
+    if (typeof GE_MATIERE_LABELS !== 'undefined' && GE_MATIERE_LABELS[m]) return GE_MATIERE_LABELS[m];
+    return m.replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase());
+  };
+  matSel.innerHTML = '<option value="">— Choisir —</option>' + [...mats].sort().map(m => `<option value="${m}">${getLabel(m)}</option>`).join('');
 }
 
-window.ntLoadNotesView = async function() {
-  const classe = document.getElementById('nt-view-classe').value;
-  const matiere = document.getElementById('nt-view-matiere').value;
-  const periode = document.getElementById('nt-view-periode').value;
-  const tbody = document.getElementById('nt-notes-tbody');
-  const stats = document.getElementById('nt-notes-stats');
+window.ntLoadNotesView = function() {
+  const classe  = document.getElementById('nt-view-classe')?.value;
+  const matiere = document.getElementById('nt-view-matiere')?.value;
+  const periode = document.getElementById('nt-view-periode')?.value;
+  const tbody   = document.getElementById('nt-notes-tbody');
+  const stats   = document.getElementById('nt-notes-stats');
   if (!tbody) return;
-  if (!classe||!matiere) { tbody.innerHTML=''; return; }
+  if (!classe || !matiere) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--gray-400)">Choisissez une classe et une matière.</td></tr>';
+    if (stats) stats.textContent = '';
+    return;
+  }
 
-  // Élèves de la classe
-  const clsSnap = await getDocs(collection(db, 'notes_classes'));
-  let eleves = [];
-  clsSnap.forEach(d => { if (d.data().nom===classe) eleves = d.data().eleves||[]; });
+  const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
+  const geNotes   = JSON.parse(localStorage.getItem('ge_notes') || '{}');
+  const eleves    = etudiants.filter(e => (e.classe || e.option || '').trim() === classe);
 
-  // Notes — chercher tous les docs notes_saisies qui correspondent
-  const profSnap = await getDocs(collection(db, 'notes_profs'));
-  const allNotes = {};
-  await Promise.all(profSnap.docs.map(async pd => {
-    const noteId = `${pd.id}_${classe}_${matiere}_${periode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
-    const ns = await getDoc(doc(db, 'notes_saisies', noteId));
-    if (ns.exists()) {
-      const data = ns.data();
-      eleves.forEach(el => { if (data[el]) allNotes[el] = {...data[el], profNom: pd.data().nom}; });
+  if (!eleves.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--gray-400)">Aucun élève dans cette classe.</td></tr>';
+    if (stats) stats.textContent = ''; return;
+  }
+
+  // Détecter primaire (même logique que geIsPrimaire)
+  const isPrim = (function(c) {
+    if (!c) return false;
+    const cl = c.trim().toLowerCase();
+    if (/\b(cp[12]?|ce[12]?|cm[12]?)\b/i.test(cl)) return true;
+    if (/\bcours\s*(préparatoire|elementaire|élémentaire|moyen)\b/i.test(cl)) return true;
+    if (/^(1[eèê]re?|[2-6][eèê]me?)\s*(ann[eé]e?)?/i.test(cl) && !/\b(coll[eè]ge|lyc[eé]e|seconde|terminal|terminale|bac)\b/i.test(cl)) return true;
+    return false;
+  })(classe);
+
+  const noteMax = isPrim ? 10 : 20;
+  const seuil   = isPrim ? 5  : 10;
+
+  const getMention = n => {
+    if (n === null) return '—';
+    if (isPrim) {
+      if (n >= 9)  return '🌟 Très Bien';
+      if (n >= 8)  return '✅ Bien';
+      if (n >= 6)  return '👍 Assez Bien';
+      if (n >= 5)  return '📘 Passable';
+      return '❌ Insuffisant';
     }
-  }));
+    if (n >= 16) return '🌟 Très Bien';
+    if (n >= 14) return '✅ Bien';
+    if (n >= 12) return '👍 Assez Bien';
+    if (n >= 10) return '📘 Passable';
+    return '❌ Insuffisant';
+  };
 
-  let total=0, count=0;
-  tbody.innerHTML = eleves.map(el => {
-    const d = allNotes[el];
-    if (d&&d.note!==undefined) { total+=d.note; count++; }
+  let total = 0, count = 0;
+  tbody.innerHTML = eleves.map((e, i) => {
+    const noteVal = geNotes[e.matricule]?.[periode]?.[matiere];
+    const note = (noteVal !== undefined && noteVal !== null && noteVal !== '') ? parseFloat(noteVal) : null;
+    if (note !== null) { total += note; count++; }
+    const couleur = note !== null ? (note >= seuil ? 'var(--success)' : 'var(--danger)') : 'var(--gray-400)';
     return `<tr>
-      <td style="padding:10px 14px;font-weight:600">${el}</td>
-      <td style="padding:10px 14px;text-align:center;font-weight:700;color:${d&&d.note>=10?'var(--success)':' var(--danger)'}">${d&&d.note!==undefined?d.note+'/20':'—'}</td>
-      <td style="padding:10px 14px;font-size:12px;color:var(--gray-600)">${d?d.appreciation||'—':'—'}</td>
-      <td style="padding:10px 14px;font-size:12px;color:var(--gray-400)">${d?d.profNom||'—':'—'}</td>
+      <td style="padding:10px 14px;color:var(--gray-400);font-size:12px">${i+1}</td>
+      <td style="padding:10px 14px;font-weight:600;color:var(--navy)">${e.nom} ${e.prenom}</td>
+      <td style="padding:10px 14px;font-size:12px;color:var(--gray-600)">${e.classe || e.option || '—'}</td>
+      <td style="padding:10px 14px;text-align:center;font-weight:700;color:${couleur}">${note !== null ? note + '/' + noteMax : '—'}</td>
+      <td style="padding:10px 14px;font-size:12px">${getMention(note)}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--gray-400);padding:20px">Aucune donnée</td></tr>';
+  }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--gray-400);padding:20px">Aucune donnée</td></tr>';
 
-  stats.textContent = count>0 ? `Moyenne de classe : ${(total/count).toFixed(2)}/20 — ${count} note(s) sur ${eleves.length} élève(s)` : '';
+  if (stats) {
+    const label = isPrim ? `🏫 Primaire /10 — seuil 5` : `📊 /20 — seuil 10`;
+    stats.textContent = count > 0
+      ? `${label} · Moyenne : ${(total/count).toFixed(2)}/${noteMax} — ${count} note(s) sur ${eleves.length} élève(s)`
+      : `Aucune note saisie pour cette sélection.`;
+  }
 };
 
 // ── Init quand page Notes ouverte ─────────────────────────
@@ -9746,116 +10197,9 @@ const _gpOrig = window.gpShowPage;
 if (typeof window.gpShowPage === 'function') {
   window.gpShowPage = function(id, el) {
     _gpOrig(id, el);
-    if (id === 'gp-notes') { ntRenderProfs(); ntSwitchTab('profs'); }
+    if (id === 'gp-notes') { ntLoadNotesSelectsFromGE(); }
   };
 }
-
-// ── Import profs depuis Gestion du Personnel ──────────────
-window.ntImportProfsFromPersonnel = async function() {
-  try {
-    const personnelRaw = localStorage.getItem('mpua_personnel');
-    if (!personnelRaw) {
-      alert('Aucun personnel trouvé dans Gestion du Personnel. Veuillez d\'abord ajouter du personnel dans cet onglet.');
-      return;
-    }
-    const personnel = JSON.parse(personnelRaw);
-    // Filtrer uniquement les enseignants (contrat non-admin, ou tous si pas de filtre)
-    const enseignants = personnel.filter(p => p.nom && p.nom.trim());
-    if (!enseignants.length) {
-      alert('Aucun enseignant valide trouvé dans Gestion du Personnel.');
-      return;
-    }
-    // Lire les profs déjà enregistrés pour éviter les doublons
-    const snap = await getDocs(collection(db, 'notes_profs'));
-    const nomsExistants = new Set(snap.docs.map(d => (d.data().nom||'').trim().toLowerCase()));
-    let nbAjoutes = 0;
-    for (const p of enseignants) {
-      const nomTrimmed = (p.nom || '').trim();
-      if (!nomTrimmed || nomsExistants.has(nomTrimmed.toLowerCase())) continue;
-      const tel = (p.tel || p.telephone || p.phone || '').replace(/\D/g,'');
-      const email = p.email || '';
-      const niveau = (p.niveau || 'secondaire').toLowerCase().includes('primaire') ? 'primaire' : 'secondaire';
-      const matieres = p.spe || p.specialite || p.matiere || p.matieres || '';
-      const classes = p.classe || p.classes || '';
-      await addDoc(collection(db, 'notes_profs'), {
-        nom: nomTrimmed,
-        tel: tel || '000000000',
-        email,
-        niveau,
-        matieres,
-        classes,
-        importeDepuisPersonnel: true
-      });
-      nomsExistants.add(nomTrimmed.toLowerCase());
-      nbAjoutes++;
-    }
-    ntRenderProfs();
-    if (typeof showToast === 'function') {
-      showToast(nbAjoutes > 0
-        ? `✅ ${nbAjoutes} professeur(s) importé(s) depuis Gestion du Personnel.`
-        : '⚠️ Tous les enseignants étaient déjà présents. Aucun doublon ajouté.');
-    }
-  } catch(err) {
-    console.error('Erreur import personnel:', err);
-    alert('Erreur lors de l\'importation : ' + err.message);
-  }
-};
-
-// ── Import élèves depuis Gestion des Élèves ───────────────
-window.ntImportElevesFromGE = async function() {
-  try {
-    const raw = localStorage.getItem('ge_etudiants');
-    if (!raw) {
-      alert('Aucun élève trouvé dans Gestion des Élèves. Veuillez d\'abord inscrire des élèves dans cet onglet.');
-      return;
-    }
-    const etudiants = JSON.parse(raw);
-    if (!etudiants.length) {
-      alert('La liste des élèves est vide dans Gestion des Élèves.');
-      return;
-    }
-    // Regrouper par classe
-    const parClasse = {};
-    etudiants.forEach(e => {
-      const cl = (e.classe || e.option || 'Sans classe').trim();
-      if (!parClasse[cl]) parClasse[cl] = [];
-      const nomComplet = (`${e.nom || ''} ${e.prenom || ''}`).trim();
-      if (nomComplet) parClasse[cl].push(nomComplet);
-    });
-    // Lire les classes existantes dans Firestore
-    const snap = await getDocs(collection(db, 'notes_classes'));
-    const existantes = {}; // nom → docId
-    snap.forEach(d => { existantes[d.data().nom] = d.id; });
-    let nbClasses = 0, nbEleves = 0;
-    for (const [nom, eleves] of Object.entries(parClasse)) {
-      if (!eleves.length) continue;
-      if (existantes[nom]) {
-        // Fusionner sans doublons
-        const ref2 = doc(db, 'notes_classes', existantes[nom]);
-        const docSnap = await getDoc(ref2);
-        const elevesActuels = docSnap.exists() ? (docSnap.data().eleves || []) : [];
-        const elevesActuelsSet = new Set(elevesActuels.map(n => n.toLowerCase()));
-        const nouveaux = eleves.filter(n => !elevesActuelsSet.has(n.toLowerCase()));
-        if (nouveaux.length) {
-          const fusionnes = [...elevesActuels, ...nouveaux];
-          await setDoc(ref2, { ...docSnap.data(), eleves: fusionnes }, { merge: true });
-          nbEleves += nouveaux.length;
-        }
-      } else {
-        await addDoc(collection(db, 'notes_classes'), { nom, niveau: 'secondaire', eleves });
-        nbClasses++;
-        nbEleves += eleves.length;
-      }
-    }
-    ntRenderClasses();
-    if (typeof showToast === 'function') {
-      showToast(`✅ Import terminé : ${nbEleves} élève(s) ajouté(s) dans ${nbClasses} nouvelle(s) classe(s) + classes existantes mises à jour.`);
-    }
-  } catch(err) {
-    console.error('Erreur import élèves:', err);
-    alert('Erreur lors de l\'importation des élèves : ' + err.message);
-  }
-};
 
 // ── Sync geEtudiants → notes_classes Firestore ────────────
 // Regroupe les élèves par classe et met à jour Firestore
