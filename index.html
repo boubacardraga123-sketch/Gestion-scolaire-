@@ -8,6 +8,320 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+// ═══════════════════════════════════════════════════════════
+//  COUCHE FIRESTORE GLOBALE — remplace localStorage
+// ═══════════════════════════════════════════════════════════
+
+// Promise résolue dès que le module Firebase expose window._db
+window._dbReadyPromise = new Promise(r => { window._dbReadyResolve = r; });
+
+// ── Helpers Firestore ─────────────────────────────────────
+const FS = {
+  async getDoc(colId, docId) {
+    const db = await window._dbReadyPromise;
+    const snap = await window._fsGetDoc(window._fsDoc(db, colId, docId));
+    return snap.exists() ? snap.data() : null;
+  },
+  async setDoc(colId, docId, data) {
+    const db = await window._dbReadyPromise;
+    await window._fsSetDoc(window._fsDoc(db, colId, docId), data);
+  },
+  async getDocs(colId) {
+    const db = await window._dbReadyPromise;
+    const snap = await window._fsGetDocs(window._fsCollection(db, colId));
+    const out = {};
+    snap.forEach(d => { out[d.id] = d.data(); });
+    return out;
+  },
+  async addDoc(colId, data) {
+    const db = await window._dbReadyPromise;
+    const ref = await window._fsAddDoc(window._fsCollection(db, colId), data);
+    return ref.id;
+  },
+  async deleteDoc(colId, docId) {
+    const db = await window._dbReadyPromise;
+    await window._fsDeleteDoc(window._fsDoc(db, colId, docId));
+  }
+};
+
+// ══════════════════════════════════════════════════════════
+//  MIGRATION localStorage → Firestore (one-shot au 1er lancement)
+// ══════════════════════════════════════════════════════════
+async function _migrateLocalStorageToFirestore() {
+  try {
+    // Vérifier si déjà migré
+    const flag = await FS.getDoc('app_meta', 'migration');
+    if (flag && flag.done) return;
+
+    // Données GE principales
+    const geData = {};
+    const GE_KEYS = ['ge_etudiants','ge_presences','ge_notes','ge_config',
+      'ge_matieres','ge_matieres_primaire','ge_periode_labels','ge_annuel_label',
+      'ge_options','ge_coefficients','ge_matieres_par_option',
+      'ge_coefficients_par_option','ge_data','ge_matiere_labels',
+      'ge_promo_plan','ge_promo_seuil'];
+    GE_KEYS.forEach(k => {
+      const v = localStorage.getItem(k);
+      if (v !== null) {
+        try { geData[k] = JSON.parse(v); } catch { geData[k] = v; }
+      }
+    });
+    if (Object.keys(geData).length) await FS.setDoc('app_data', 'ge_main', geData);
+
+    // Personnel + présences + appréciations
+    const personnelData = {
+      personnel: JSON.parse(localStorage.getItem('mpua_personnel') || '[]'),
+      presences: JSON.parse(localStorage.getItem('mpua_presences') || '{}'),
+      appreciations: JSON.parse(localStorage.getItem('mpua_appreciations') || '[]')
+    };
+    await FS.setDoc('app_data', 'personnel', personnelData);
+
+    // Inspection
+    const insData = localStorage.getItem('inspection_data');
+    if (insData) await FS.setDoc('app_data', 'inspection', { _json: insData });
+
+    // UI settings
+    const uiData = {};
+    ['guinee_logo','bg_image','bg_opacity','bg_position','bg_size'].forEach(k => {
+      const v = localStorage.getItem(k);
+      if (v !== null) uiData[k] = v;
+    });
+    if (Object.keys(uiData).length) await FS.setDoc('app_data', 'ui_settings', uiData);
+
+    // EDT / EDTP / Archives MPUA
+    const miscData = {};
+    ['etfp_edt_creneaux','etfp_edtp_creneaux','mpua_archives_v1','etfp_pwd'].forEach(k => {
+      const v = localStorage.getItem(k);
+      if (v !== null) { try { miscData[k] = JSON.parse(v); } catch { miscData[k] = v; } }
+    });
+    if (Object.keys(miscData).length) await FS.setDoc('app_data', 'misc', miscData);
+
+    // Archives GE (ge_archive__*)
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('ge_archive__')) {
+        try {
+          const snap = JSON.parse(localStorage.getItem(k));
+          const fsKey = k.replace(/[^a-zA-Z0-9_\-]/g, '_');
+          await FS.setDoc('ge_archives', fsKey, snap);
+        } catch(e) {}
+      }
+    }
+
+    // Marquer migration terminée
+    await FS.setDoc('app_meta', 'migration', { done: true, date: new Date().toISOString() });
+    console.log('✅ Migration localStorage → Firestore terminée.');
+  } catch(e) {
+    console.warn('Migration Firestore échouée:', e);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  COUCHE DE COMPATIBILITÉ localStorage — redirige vers Firestore
+//  (remplace les appels directs localStorage pour les données app)
+// ══════════════════════════════════════════════════════════
+
+// Cache mémoire (évite les lectures Firestore répétées dans la session)
+window._fsCache = {};
+
+// Lecture synchrone depuis le cache (après chargement initial)
+function _lsGet(key) {
+  if (key in window._fsCache) return window._fsCache[key];
+  return null; // données pas encore chargées
+}
+function _lsSet(key, value) {
+  window._fsCache[key] = value;
+  _fsSaveKey(key, value); // écriture async en arrière-plan
+}
+function _lsRemove(key) {
+  delete window._fsCache[key];
+  _fsSaveKey(key, null);
+}
+
+// Détermine la collection/doc Firestore pour une clé donnée
+function _fsKeyToDocPath(key) {
+  if (['ge_etudiants','ge_presences','ge_notes','ge_config','ge_matieres',
+       'ge_matieres_primaire','ge_periode_labels','ge_annuel_label','ge_options',
+       'ge_coefficients','ge_matieres_par_option','ge_coefficients_par_option',
+       'ge_data','ge_matiere_labels','ge_promo_plan','ge_promo_seuil'].includes(key))
+    return ['app_data','ge_main'];
+  if (['mpua_personnel','mpua_presences','mpua_appreciations'].includes(key))
+    return ['app_data','personnel'];
+  if (key === 'inspection_data') return ['app_data','inspection'];
+  if (['guinee_logo','bg_image','bg_opacity','bg_position','bg_size'].includes(key))
+    return ['app_data','ui_settings'];
+  if (['etfp_edt_creneaux','etfp_edtp_creneaux','mpua_archives_v1','etfp_pwd'].includes(key))
+    return ['app_data','misc'];
+  return null;
+}
+
+// Map: quel champ dans le doc Firestore pour cette clé localStorage
+function _fsKeyToField(key) {
+  const map = {
+    'mpua_personnel': 'personnel',
+    'mpua_presences': 'presences',
+    'mpua_appreciations': 'appreciations',
+    'inspection_data': '_json',
+    'etfp_edt_creneaux': 'etfp_edt_creneaux',
+    'etfp_edtp_creneaux': 'etfp_edtp_creneaux',
+    'mpua_archives_v1': 'mpua_archives_v1',
+    'etfp_pwd': 'etfp_pwd',
+  };
+  return map[key] || key;
+}
+
+// Sauvegarde async d'une clé vers Firestore
+async function _fsSaveKey(key, value) {
+  try {
+    const path = _fsKeyToDocPath(key);
+    if (!path) return;
+    const [col, docId] = path;
+    const db = await window._dbReadyPromise;
+    const field = _fsKeyToField(key);
+    const update = {};
+    if (value === null) {
+      // on ne peut pas "supprimer" un champ facilement, on met null
+      update[field] = null;
+    } else {
+      update[field] = (typeof value === 'string') ? (() => { try { return JSON.parse(value); } catch { return value; } })() : value;
+    }
+    const { setDoc: sd, doc: d } = { setDoc: window._fsSetDoc, doc: window._fsDoc };
+    await sd(d(db, col, docId), update, { merge: true });
+  } catch(e) {
+    console.warn('_fsSaveKey error:', key, e);
+  }
+}
+
+// ── Chargement initial de toutes les données depuis Firestore ──
+window._fsLoaded = false;
+window._fsLoadPromise = (async () => {
+  try {
+    await window._dbReadyPromise;
+    // Lancer migration one-shot si nécessaire
+    await _migrateLocalStorageToFirestore();
+
+    // Charger tous les docs en parallèle
+    const [geMain, personnelDoc, inspDoc, uiDoc, miscDoc] = await Promise.all([
+      FS.getDoc('app_data', 'ge_main'),
+      FS.getDoc('app_data', 'personnel'),
+      FS.getDoc('app_data', 'inspection'),
+      FS.getDoc('app_data', 'ui_settings'),
+      FS.getDoc('app_data', 'misc'),
+    ]);
+
+    // Peupler le cache
+    if (geMain) {
+      Object.entries(geMain).forEach(([k, v]) => {
+        window._fsCache[k] = typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v ?? '');
+      });
+    }
+    if (personnelDoc) {
+      if (personnelDoc.personnel !== undefined) window._fsCache['mpua_personnel'] = JSON.stringify(personnelDoc.personnel || []);
+      if (personnelDoc.presences !== undefined) window._fsCache['mpua_presences'] = JSON.stringify(personnelDoc.presences || {});
+      if (personnelDoc.appreciations !== undefined) window._fsCache['mpua_appreciations'] = JSON.stringify(personnelDoc.appreciations || []);
+    }
+    if (inspDoc && inspDoc._json) window._fsCache['inspection_data'] = inspDoc._json;
+    if (uiDoc) {
+      ['guinee_logo','bg_image','bg_opacity','bg_position','bg_size'].forEach(k => {
+        if (uiDoc[k] !== undefined && uiDoc[k] !== null) window._fsCache[k] = uiDoc[k];
+      });
+    }
+    if (miscDoc) {
+      ['etfp_edt_creneaux','etfp_edtp_creneaux','mpua_archives_v1','etfp_pwd'].forEach(k => {
+        if (miscDoc[k] !== undefined && miscDoc[k] !== null)
+          window._fsCache[k] = typeof miscDoc[k] === 'object' ? JSON.stringify(miscDoc[k]) : String(miscDoc[k]);
+      });
+    }
+    window._fsLoaded = true;
+    console.log('✅ Données Firestore chargées dans le cache.');
+    // Recharger les variables inspection depuis le cache
+    try {
+      const _id = localStorage.getItem('inspection_data');
+      if (_id && typeof data !== 'undefined') {
+        const parsed = JSON.parse(_id);
+        Object.assign(data, parsed);
+      }
+    } catch {}
+    // Recharger les variables personnel depuis le cache
+    try {
+      const _p = localStorage.getItem('mpua_personnel');
+      if (_p && typeof personnel !== 'undefined') personnel.splice(0, personnel.length, ...JSON.parse(_p));
+      const _pr = localStorage.getItem('mpua_presences');
+      if (_pr && typeof presenceData !== 'undefined') Object.assign(presenceData, JSON.parse(_pr));
+      const _ap = localStorage.getItem('mpua_appreciations');
+      if (_ap && typeof apprecData !== 'undefined') apprecData.splice(0, apprecData.length, ...JSON.parse(_ap));
+    } catch {}
+    // Déclencher le rechargement de l'UI après chargement Firestore
+    if (typeof geLoad === 'function') geLoad();
+    if (typeof geSyncMatieresDepuisNotes === 'function') geSyncMatieresDepuisNotes();
+    // Sync notes profs (notes_saisies → geNotes) au démarrage
+    if (typeof window.geSyncNotesFromFirestore === 'function') {
+      window.geSyncNotesFromFirestore().then(() => {
+        if (typeof geLoad === 'function') geLoad();
+      });
+    }
+    // Sync initiale : tous les élèves existants → personnel
+    if (typeof geSyncTousEtudiantsVersPersonnel === 'function') geSyncTousEtudiantsVersPersonnel();
+    if (typeof renderPersonnelTable === 'function') renderPersonnelTable();
+    if (typeof updateDashboard === 'function') updateDashboard();
+    if (typeof initPlatform === 'function') {
+      if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',initPlatform);}else{initPlatform();}
+    }
+    // Logo Guinée
+    const logo = window._fsCache['guinee_logo'];
+    if (logo && typeof applyGuineeLogo === 'function') applyGuineeLogo(logo);
+    // Fond d'écran
+    if (typeof _applyBgFromCache === 'function') _applyBgFromCache();
+  } catch(e) {
+    console.error('Erreur chargement Firestore:', e);
+    window._fsLoaded = true; // continuer quand même
+  }
+})();
+
+// ── Shim localStorage : intercepte les accès à localStorage ──
+// On surcharge les méthodes pour les clés applicatives
+const _origLSGetItem   = Storage.prototype.getItem;
+const _origLSSetItem   = Storage.prototype.setItem;
+const _origLSRemoveItem= Storage.prototype.removeItem;
+
+const _FS_MANAGED_KEYS = new Set([
+  'ge_etudiants','ge_presences','ge_notes','ge_config','ge_matieres',
+  'ge_matieres_primaire','ge_periode_labels','ge_annuel_label','ge_options',
+  'ge_coefficients','ge_matieres_par_option','ge_coefficients_par_option',
+  'ge_data','ge_matiere_labels','ge_promo_plan','ge_promo_seuil',
+  'mpua_personnel','mpua_presences','mpua_appreciations',
+  'inspection_data',
+  'guinee_logo','bg_image','bg_opacity','bg_position','bg_size',
+  'etfp_edt_creneaux','etfp_edtp_creneaux','mpua_archives_v1','etfp_pwd'
+]);
+
+Storage.prototype.getItem = function(key) {
+  if (this === localStorage && _FS_MANAGED_KEYS.has(key)) {
+    const v = window._fsCache[key];
+    return (v !== undefined && v !== null) ? v : null;
+  }
+  return _origLSGetItem.call(this, key);
+};
+
+Storage.prototype.setItem = function(key, value) {
+  if (this === localStorage && _FS_MANAGED_KEYS.has(key)) {
+    window._fsCache[key] = value;
+    _fsSaveKey(key, value);
+    return;
+  }
+  _origLSSetItem.call(this, key, value);
+};
+
+Storage.prototype.removeItem = function(key) {
+  if (this === localStorage && _FS_MANAGED_KEYS.has(key)) {
+    delete window._fsCache[key];
+    _fsSaveKey(key, null);
+    return;
+  }
+  _origLSRemoveItem.call(this, key);
+};
+</script>
 <style>
   :root {
     --navy: #0d2137;
@@ -1203,6 +1517,39 @@
 </head>
 <body class="locked">
 
+<!-- ═══ CHARGEMENT FIRESTORE ═══ -->
+<div id="fs-loading-overlay" style="
+  position:fixed;inset:0;z-index:99999;
+  background:linear-gradient(135deg,#0d2137,#163352);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-family:'DM Sans',sans-serif;color:#e8eaf6;
+  transition:opacity 0.5s ease;
+">
+  <div style="font-size:2.5rem;margin-bottom:16px;">🌐</div>
+  <div style="font-size:1.1rem;font-weight:700;margin-bottom:8px;color:#e8b84b;">Chargement des données…</div>
+  <div style="font-size:0.85rem;color:#7a85a3;margin-bottom:24px;">Connexion à Firebase Firestore</div>
+  <div style="width:180px;height:4px;background:#1f2e40;border-radius:2px;overflow:hidden;">
+    <div id="fs-loading-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#c9922a,#e8b84b);border-radius:2px;transition:width 0.4s ease;"></div>
+  </div>
+</div>
+<script>
+  // Animer la barre de chargement
+  let _barW = 0;
+  const _barEl = document.getElementById('fs-loading-bar');
+  const _barInter = setInterval(() => {
+    _barW = Math.min(_barW + Math.random() * 15, 85);
+    if (_barEl) _barEl.style.width = _barW + '%';
+  }, 300);
+  window._fsLoadPromise.then(() => {
+    clearInterval(_barInter);
+    if (_barEl) _barEl.style.width = '100%';
+    setTimeout(() => {
+      const ov = document.getElementById('fs-loading-overlay');
+      if (ov) { ov.style.opacity = '0'; setTimeout(() => ov.remove(), 500); }
+    }, 400);
+  });
+</script>
+
 <!-- ═══ ÉCRAN DE CONNEXION ═══ -->
 <div id="lock-screen">
   <div class="lock-box">
@@ -1572,9 +1919,6 @@
         <div class="ge-nav-item" onclick="gpShowPage('gp-edt', this)">
           <span class="ge-icon">🗓️</span> Emploi du Temps
         </div>
-        <div class="ge-nav-item" onclick="gpShowPage('gp-notes', this)">
-          <span class="ge-icon">📒</span> Notes &amp; Profs
-        </div>
       </aside>
 
       <!-- Contenu principal personnel -->
@@ -1600,27 +1944,7 @@
 
     <!-- Formulaire ajout -->
     <div class="card no-print" id="personnel-form" style="display:none;margin-bottom:24px">
-      <strong style="font-family:'Playfair Display',serif;font-size:15px;color:var(--navy);display:block;margin-bottom:16px">Nouvel agent</strong>
-      <div class="form-grid">
-        <div class="form-group"><label>N° Matricule</label><input type="text" id="pf-mat" placeholder="MAT-001"></div>
-        <div class="form-group"><label>Nom & Prénom(s)</label><input type="text" id="pf-nom" placeholder="NOM Prénom"></div>
-        <div class="form-group"><label>Spécialité</label><input type="text" id="pf-spe" placeholder="Ex : Informatique"></div>
-        <div class="form-group"><label>Type de contrat</label><select id="pf-contrat"><option value="Fonctionnaire">Fonctionnaire</option><option value="Contractuel">Contractuel</option><option value="Vacataire">Vacataire</option><option value="Stagiaire">Stagiaire</option></select></div>
-        <div class="form-group"><label>Date d'embauche</label><input type="date" id="pf-date"></div>
-        <div class="form-group"><label>Classe / Niveau affecté</label><input type="text" id="pf-classe" placeholder="Ex : Tle BT"></div>
-        <div class="form-group"><label>Nbre heures/sem.</label><input type="number" id="pf-heures" placeholder="Ex : 18"></div>
-        <div class="form-group"><label>Téléphone</label><input type="tel" id="pf-tel" placeholder="+237 6XX…"></div>
-        <div class="form-group"><label>Email</label><input type="email" id="pf-email" placeholder="agent@…"></div>
-        <div class="form-group"><label>Sexe</label>
-          <select id="pf-sexe"><option value="M">Masculin</option><option value="F">Féminin</option></select>
-        </div>
-        <div class="form-group"><label>Date de naissance</label><input type="date" id="pf-naissance"></div>
-        <div class="form-group full"><label>Observations</label><textarea id="pf-obs" placeholder="Observations…" style="min-height:60px"></textarea></div>
-      </div>
-      <div style="display:flex;gap:10px;margin-top:16px">
-        <button class="btn btn-success" onclick="savePersonnel()">✓ Enregistrer</button>
-        <button class="btn btn-primary" onclick="document.getElementById('personnel-form').style.display='none'">Annuler</button>
-      </div>
+      <!-- Ce div est maintenant vide — le formulaire est dans #ge-modal-add-personnel -->
     </div>
 
     <div class="table-wrap">
@@ -1841,60 +2165,6 @@
         </div>
 
       <!-- SUB-PAGE: NOTES & PROFS -->
-      <div class="gp-page" id="gp-notes">
-        <div class="container">
-          <div class="section-header">
-            <div>
-              <div class="section-title">📊 Consulter les Notes</div>
-              <div class="section-sub">Notes saisies par les professeurs — résultats par classe et matière</div>
-            </div>
-            <button class="btn btn-primary no-print" onclick="ntLoadNotesSelectsFromGE()">🔄 Actualiser</button>
-          </div>
-
-          <!-- Filtres -->
-          <div class="card no-print" style="margin-bottom:20px">
-            <div class="form-grid">
-              <div class="form-group"><label>Classe</label>
-                <select id="nt-view-classe" onchange="ntLoadNotesView()">
-                  <option value="">— Choisir —</option>
-                </select>
-              </div>
-              <div class="form-group"><label>Matière</label>
-                <select id="nt-view-matiere" onchange="ntLoadNotesView()">
-                  <option value="">— Choisir —</option>
-                </select>
-              </div>
-              <div class="form-group"><label>Période</label>
-                <select id="nt-view-periode" onchange="ntLoadNotesView()">
-                  <option value="s1">1er Trimestre / Semestre</option>
-                  <option value="s2">2ème Trimestre / Semestre</option>
-                  <option value="s3">3ème Trimestre / Semestre</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <!-- Tableau des notes -->
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>N°</th><th>Élève</th><th>Classe</th><th>Note /20</th><th>Mention</th></tr></thead>
-              <tbody id="nt-notes-tbody">
-                <tr><td colspan="5" style="text-align:center;padding:32px;color:var(--gray-400)">Choisissez une classe et une matière pour afficher les notes.</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div id="nt-notes-stats" style="margin-top:14px;font-size:13px;color:var(--navy);font-weight:600;padding:0 4px"></div>
-
-          <!-- Panneaux cachés gardés pour compatibilité JS -->
-          <div id="nt-panel-profs" style="display:none"></div>
-          <div id="nt-panel-classes" style="display:none"></div>
-          <div id="nt-panel-notes" style="display:none"></div>
-          <div id="nt-profs-tbody" style="display:none"></div>
-          <div id="nt-classes-list" style="display:none"></div>
-
-        </div>
-      </div>
-
       </main>
     </div>
   </div>
@@ -2366,7 +2636,9 @@
 // ============================================================
 // DONNÉES
 // ============================================================
-let data = JSON.parse(localStorage.getItem('inspection_data') || '{}');
+// données inspection — chargées depuis Firestore via le shim localStorage
+let data = {};
+try { const _id = localStorage.getItem('inspection_data'); if(_id) data = JSON.parse(_id); } catch {}
 if (!data.config) data.config = { nom:'', annee:'2024 – 2025', adresse:'Conakry, Guinée', tel:'', email:'', directeur:'', region:'Conakry', code:'ETB-001', classe:'7A' };
 if (!data.enseignants) data.enseignants = [];
 if (!data.inspections) data.inspections = [];
@@ -3329,6 +3601,7 @@ function showTab(id) {
                 <div class="ge-page-sub">Profil complet : identité, notes, présences et résultats</div>
               </div>
               <div style="display:flex;gap:8px;" class="ge-print-hide">
+                <button class="ge-btn ge-btn-ghost" style="color:var(--ge-gold);border-color:var(--ge-gold);" onclick="geSyncNotesFromFirestore().then(()=>geFicheRender())">🔄 Sync notes profs</button>
                 <button class="ge-btn ge-btn-ghost" onclick="geFicheImprimer()">🖨️ Imprimer</button>
               </div>
             </div>
@@ -3337,7 +3610,7 @@ function showTab(id) {
               <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
                 <div style="flex:1;min-width:200px;">
                   <label style="font-size:0.75rem;color:#7a85a3;display:block;margin-bottom:4px;">SÉLECTIONNER UN ÉLÈVE</label>
-                  <select class="ge-select" id="ge-fiche-select" onchange="geFicheRender()" style="width:100%;">
+                  <select class="ge-select" id="ge-fiche-select" onchange="geSyncNotesFromFirestore().then(()=>geFicheRender())" style="width:100%;">
                     <option value="">— Choisir un élève —</option>
                   </select>
                 </div>
@@ -3363,6 +3636,7 @@ function showTab(id) {
                 <div class="ge-page-sub">Génération automatique des bulletins scolaires individuels</div>
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                <button class="ge-btn ge-btn-ghost ge-print-hide" style="color:var(--ge-gold);border-color:var(--ge-gold);" onclick="geSyncNotesFromFirestore().then(()=>geRenderBulletins())">🔄 Sync notes profs</button>
                 <button class="ge-btn ge-btn-ghost ge-print-hide" onclick="gePrintTousBulletins()">🖨️ Imprimer tous</button>
               </div>
             </div>
@@ -3390,7 +3664,7 @@ function showTab(id) {
                     <option value="">— Sélectionner un élève —</option>
                   </select>
                 </div>
-                <button class="ge-btn ge-btn-primary" onclick="geRenderBulletins()">🔄 Actualiser</button>
+                <button class="ge-btn ge-btn-primary" onclick="geSyncNotesFromFirestore().then(()=>geRenderBulletins())">🔄 Actualiser</button>
               </div>
             </div>
             <!-- Zone d'affichage des bulletins -->
@@ -3780,8 +4054,71 @@ function showTab(id) {
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ -->
-<!--  MODAL : EMPLOI DU TEMPS — AJOUTER / MODIFIER CRÉNEAU   -->
+<!--  MODAL : AJOUTER / MODIFIER UN AGENT DU PERSONNEL      -->
 <!-- ═══════════════════════════════════════════════════════ -->
+<div class="ge-modal-overlay" id="ge-modal-add-personnel">
+  <div class="ge-modal" style="max-width:620px;">
+    <div class="ge-modal-header">
+      <div class="ge-modal-title" id="ge-modal-pers-title">➕ Ajouter un agent</div>
+      <button class="ge-modal-close" onclick="document.getElementById('ge-modal-add-personnel').classList.remove('ge-open')">✕</button>
+    </div>
+    <div class="ge-form-grid">
+      <input type="hidden" id="pf-edit-id" value="">
+      <!-- PHOTO DE PROFIL -->
+      <div class="ge-field ge-full" style="display:flex;align-items:center;gap:20px;background:#1f2436;border:1px solid #2a3148;border-radius:12px;padding:16px 18px;margin-bottom:4px;">
+        <div style="position:relative;flex-shrink:0;">
+          <div id="pf-photo-preview" onclick="document.getElementById('pf-photo-input').click()"
+            style="width:90px;height:90px;border-radius:50%;background:#0f1117;border:2px dashed #c9922a;display:flex;align-items:center;justify-content:center;font-size:36px;overflow:hidden;cursor:pointer;" title="Cliquer pour choisir une photo">
+            <span id="pf-photo-placeholder">📷</span>
+            <img id="pf-photo-img" src="" alt="Photo" style="display:none;width:100%;height:100%;object-fit:cover;border-radius:50%;">
+          </div>
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:0.82rem;font-weight:700;color:#e8eaf6;margin-bottom:4px;">📸 Photo de profil</div>
+          <div style="font-size:0.75rem;color:#7a85a3;margin-bottom:10px;">Formats acceptés : JPG, PNG, WebP · Max recommandé : 2 Mo</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="ge-btn ge-btn-primary" style="font-size:0.78rem;padding:6px 12px;" onclick="document.getElementById('pf-photo-input').click()">📁 Choisir une photo</button>
+            <button type="button" class="ge-btn ge-btn-ghost" style="font-size:0.78rem;padding:6px 12px;" onclick="pfPhotoSupprimer()">🗑️ Supprimer</button>
+          </div>
+          <input type="file" id="pf-photo-input" accept="image/*" style="display:none;" onchange="pfPhotoLoad(this)">
+          <input type="hidden" id="pf-photo" value="">
+        </div>
+      </div>
+      <!-- CHAMPS IDENTITÉ -->
+      <div class="ge-field"><label>N° Matricule</label><input type="text" class="ge-input" id="pf-mat" placeholder="MAT-001"></div>
+      <div class="ge-field"><label>Sexe</label>
+        <select class="ge-select" id="pf-sexe">
+          <option value="M">Masculin</option>
+          <option value="F">Féminin</option>
+        </select>
+      </div>
+      <div class="ge-field"><label>Nom & Prénom(s)</label><input type="text" class="ge-input" id="pf-nom" placeholder="NOM Prénom(s)"></div>
+      <div class="ge-field"><label>Date de naissance</label><input type="date" class="ge-input" id="pf-naissance"></div>
+      <!-- CHAMPS PROFESSIONNELS -->
+      <div class="ge-field"><label>Spécialité / Matière</label><input type="text" class="ge-input" id="pf-spe" placeholder="Ex : Physique, Informatique"></div>
+      <div class="ge-field"><label>Type de contrat</label>
+        <select class="ge-select" id="pf-contrat">
+          <option value="Fonctionnaire">Fonctionnaire</option>
+          <option value="Contractuel">Contractuel</option>
+          <option value="Vacataire">Vacataire</option>
+          <option value="Stagiaire">Stagiaire</option>
+        </select>
+      </div>
+      <div class="ge-field"><label>Date d'embauche</label><input type="date" class="ge-input" id="pf-date"></div>
+      <div class="ge-field"><label>Classe / Niveau affecté</label><input type="text" class="ge-input" id="pf-classe" placeholder="Ex : Tle BT, CE1…"></div>
+      <div class="ge-field"><label>Nbre heures / semaine</label><input type="number" class="ge-input" id="pf-heures" placeholder="Ex : 18" min="0"></div>
+      <!-- CONTACT -->
+      <div class="ge-field"><label>Téléphone</label><input type="tel" class="ge-input" id="pf-tel" placeholder="+224 6XX XX XX XX"></div>
+      <div class="ge-field ge-full"><label>Email</label><input type="email" class="ge-input" id="pf-email" placeholder="agent@etablissement.gn"></div>
+      <!-- OBSERVATIONS -->
+      <div class="ge-field ge-full"><label>Observations</label><textarea class="ge-input" id="pf-obs" placeholder="Observations, notes internes…" style="min-height:68px;resize:vertical;"></textarea></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:1.5rem;">
+      <button class="ge-btn ge-btn-ghost" onclick="document.getElementById('ge-modal-add-personnel').classList.remove('ge-open')">Annuler</button>
+      <button class="ge-btn ge-btn-primary" onclick="savePersonnel()">✓ Enregistrer</button>
+    </div>
+  </div>
+</div>
 <div id="edt-modal" style="display:none;position:fixed;inset:0;background:rgba(13,33,55,.6);z-index:10000;align-items:center;justify-content:center">
   <div style="background:white;border-radius:16px;padding:32px;width:480px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,.3)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
@@ -4006,9 +4343,12 @@ function showTab(id) {
 <!-- ═══════════════════════════════════════════════════════ -->
 <script>
 // ── STATE ──────────────────────────────────────────────────
-let personnel = JSON.parse(localStorage.getItem('mpua_personnel') || '[]');
-let presenceData = JSON.parse(localStorage.getItem('mpua_presences') || '{}');
-let apprecData = JSON.parse(localStorage.getItem('mpua_appreciations') || '[]');
+let personnel = [];
+let presenceData = {};
+let apprecData = [];
+try { const _p = localStorage.getItem('mpua_personnel'); if(_p) personnel = JSON.parse(_p); } catch {}
+try { const _pr = localStorage.getItem('mpua_presences'); if(_pr) presenceData = JSON.parse(_pr); } catch {}
+try { const _ap = localStorage.getItem('mpua_appreciations'); if(_ap) apprecData = JSON.parse(_ap); } catch {}
 
 // ── NAVIGATION ─────────────────────────────────────────────
 function showPage(id, btn) {
@@ -4029,6 +4369,7 @@ function showPage(id, btn) {
     const activeSub = document.querySelector('.gp-page.gp-active');
     if (activeSub) {
       const subId = activeSub.id;
+      if (subId === 'gp-personnel') renderPersonnelTable();
       if (subId === 'gp-dashboard') updateDashboard();
       if (subId === 'gp-presence') renderPresence();
       if (subId === 'gp-appreciations') syncPersonnelFiches();
@@ -4047,6 +4388,7 @@ function gpShowPage(id, navEl) {
   if (page) page.classList.add('gp-active');
   if (navEl) navEl.classList.add('ge-active');
   // Déclencher les renders spécifiques
+  if (id === 'gp-personnel') renderPersonnelTable();
   if (id === 'gp-dashboard') updateDashboard();
   if (id === 'gp-presence') renderPresence();
   if (id === 'gp-appreciations') syncPersonnelFiches();
@@ -4063,40 +4405,81 @@ function showToast(msg) {
 
 // ── PERSONNEL ──────────────────────────────────────────────
 function addPersonnel() {
-  const f = document.getElementById('personnel-form');
-  f.style.display = f.style.display === 'none' || !f.style.display ? 'block' : 'none';
+  // Réinitialiser les champs
+  ['pf-mat','pf-nom','pf-spe','pf-date','pf-classe','pf-heures','pf-tel','pf-email','pf-obs','pf-naissance'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  const sexeSel = document.getElementById('pf-sexe'); if (sexeSel) sexeSel.value = 'M';
+  const contratSel = document.getElementById('pf-contrat'); if (contratSel) contratSel.value = 'Fonctionnaire';
+  const editId = document.getElementById('pf-edit-id'); if (editId) editId.value = '';
+  pfPhotoSupprimer();
+  const title = document.getElementById('ge-modal-pers-title');
+  if (title) title.textContent = '➕ Ajouter un agent';
+  document.getElementById('ge-modal-add-personnel').classList.add('ge-open');
+}
+
+function pfPhotoLoad(input) {
+  const file = input.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('pf-photo').value = e.target.result;
+    const img = document.getElementById('pf-photo-img');
+    const placeholder = document.getElementById('pf-photo-placeholder');
+    if (img) { img.src = e.target.result; img.style.display = 'block'; }
+    if (placeholder) placeholder.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+function pfPhotoSupprimer() {
+  const photo = document.getElementById('pf-photo'); if (photo) photo.value = '';
+  const img = document.getElementById('pf-photo-img'); if (img) { img.src = ''; img.style.display = 'none'; }
+  const placeholder = document.getElementById('pf-photo-placeholder'); if (placeholder) placeholder.style.display = '';
+  const input = document.getElementById('pf-photo-input'); if (input) input.value = '';
 }
 
 function savePersonnel() {
   const mat   = document.getElementById('pf-mat').value.trim();
   const nom   = document.getElementById('pf-nom').value.trim();
   if (!nom) { showToast('⚠️ Le nom est obligatoire.'); return; }
+  const editId = document.getElementById('pf-edit-id')?.value;
+  const isEdit = editId && editId !== '';
   const agent = {
-    id: Date.now(),
-    mat: mat || 'MAT-' + String(personnel.length + 1).padStart(3, '0'),
+    id:        isEdit ? parseInt(editId) : Date.now(),
+    mat:       mat || 'MAT-' + String(personnel.length + 1).padStart(3, '0'),
     nom,
-    spe:      document.getElementById('pf-spe').value,
-    grade:    '',
-    contrat:  document.getElementById('pf-contrat').value,
-    date:     document.getElementById('pf-date').value,
-    classe:   document.getElementById('pf-classe').value,
-    heures:   document.getElementById('pf-heures').value,
-    tel:      document.getElementById('pf-tel').value,
-    email:    document.getElementById('pf-email').value,
-    statut:   document.getElementById('pf-contrat').value,
-    sexe:     document.getElementById('pf-sexe').value,
-    naissance:document.getElementById('pf-naissance').value,
-    obs:      document.getElementById('pf-obs').value,
+    spe:       document.getElementById('pf-spe').value,
+    grade:     '',
+    contrat:   document.getElementById('pf-contrat').value,
+    date:      document.getElementById('pf-date').value,
+    classe:    document.getElementById('pf-classe').value,
+    heures:    document.getElementById('pf-heures').value,
+    tel:       document.getElementById('pf-tel').value,
+    email:     document.getElementById('pf-email').value,
+    statut:    document.getElementById('pf-contrat').value,
+    sexe:      document.getElementById('pf-sexe').value,
+    naissance: document.getElementById('pf-naissance').value,
+    obs:       document.getElementById('pf-obs').value,
+    photo:     document.getElementById('pf-photo')?.value || '',
   };
-  personnel.push(agent);
+  if (isEdit) {
+    const idx = personnel.findIndex(a => a.id === agent.id);
+    if (idx !== -1) personnel[idx] = agent;
+    else personnel.push(agent);
+  } else {
+    personnel.push(agent);
+  }
   localStorage.setItem('mpua_personnel', JSON.stringify(personnel));
   renderPersonnelTable();
-  document.getElementById('personnel-form').style.display = 'none';
-  ['pf-mat','pf-nom','pf-spe','pf-date','pf-classe','pf-heures','pf-tel','pf-email','pf-obs'].forEach(id => document.getElementById(id).value = '');
-  showToast('✅ Agent enregistré avec succès.');
+  document.getElementById('ge-modal-add-personnel').classList.remove('ge-open');
+  showToast(isEdit ? '✅ Agent modifié avec succès.' : '✅ Agent enregistré avec succès.');
   updateDashboard();
   syncPersonnelFiches();
   updateWelcomeKPIs();
+  // Afficher automatiquement le lien après ajout d'un nouvel agent
+  if (!isEdit && (agent.tel || agent.email)) {
+    setTimeout(() => { if (typeof window.gpEnvoyerLienProf === 'function') window.gpEnvoyerLienProf(agent.id); }, 300);
+  }
 }
 
 function renderPersonnelTable() {
@@ -4119,7 +4502,8 @@ function renderPersonnelTable() {
       <td><span class="badge badge-${(a.contrat||'').toLowerCase()}">${a.contrat || '—'}</span></td>
       <td>${a.sexe || '—'}</td>
       <td class="no-print" style="white-space:nowrap">
-        <button class="btn btn-danger" style="padding:5px 10px;font-size:12px" onclick="deletePersonnel(${a.id})">Suppr.</button>
+        <button class="btn btn-primary" style="padding:5px 10px;font-size:12px" onclick="editPersonnel(${a.id})">✏️ Mod.</button>
+        <button class="btn btn-danger" style="padding:5px 10px;font-size:12px;margin-left:4px" onclick="deletePersonnel(${a.id})">Suppr.</button>
         ${(a.tel||a.email) ? `<button class="btn btn-success" style="padding:5px 10px;font-size:12px;margin-left:4px" onclick="gpEnvoyerLienProf(${a.id})" title="Envoyer le lien de saisie des notes">📲 Lien</button>` : ''}
       </td>
     </tr>`).join('');
@@ -4132,8 +4516,38 @@ function deletePersonnel(id) {
   renderPersonnelTable();
   updateDashboard();
   showToast('🗑️ Agent supprimé.');
-  syncPersonnelFiches();
-  updateWelcomeKPIs();
+}
+
+function editPersonnel(id) {
+  const a = personnel.find(x => x.id === id);
+  if (!a) return;
+  // Pré-remplir les champs du modal
+  const _v = (elId, val) => { const el = document.getElementById(elId); if (el) el.value = val || ''; };
+  _v('pf-edit-id', a.id);
+  _v('pf-mat', a.mat);
+  _v('pf-nom', a.nom);
+  _v('pf-naissance', a.naissance);
+  _v('pf-spe', a.spe);
+  _v('pf-contrat', a.contrat);
+  _v('pf-date', a.date);
+  _v('pf-classe', a.classe);
+  _v('pf-heures', a.heures);
+  _v('pf-tel', a.tel);
+  _v('pf-email', a.email);
+  _v('pf-obs', a.obs);
+  const sexeSel = document.getElementById('pf-sexe'); if (sexeSel) sexeSel.value = a.sexe || 'M';
+  // Photo
+  pfPhotoSupprimer();
+  if (a.photo) {
+    document.getElementById('pf-photo').value = a.photo;
+    const img = document.getElementById('pf-photo-img');
+    const ph  = document.getElementById('pf-photo-placeholder');
+    if (img) { img.src = a.photo; img.style.display = 'block'; }
+    if (ph)  ph.style.display = 'none';
+  }
+  const title = document.getElementById('ge-modal-pers-title');
+  if (title) title.textContent = '✏️ Modifier l\'agent';
+  document.getElementById('ge-modal-add-personnel').classList.add('ge-open');
 }
 
 // ── SYNC FICHES ────────────────────────────────────────────
@@ -4532,6 +4946,27 @@ window.gpEnvoyerTousLesLiens = function() {
         }
       } catch(e4) {}
     } catch(err) { console.warn('Erreur sync ge_data:', err); }
+
+    // ── Sync vers Firestore notes_saisies (même comportement que l'interface ?prof=ID) ──
+    (async () => {
+      try {
+        const db = await window._dbReadyPromise;
+        const { setDoc: sd, doc: d } = { setDoc: window._fsSetDoc, doc: window._fsDoc };
+        if (!sd || !d) return;
+        const periodeMap = { s1:'T1', s2:'T2', s3:'T3' };
+        const periodeT = periodeMap[periodeStr] || periodeStr;
+        const agentId = window._gpProfData.agent?.id || 'internal';
+        const noteId = `${agentId}_${classe}_${matiereKey}_${periodeT}`.replace(/[^a-zA-Z0-9_-]/g,'_');
+        const fsData = { classe, matiere: matiereKey, periode: periodeT, profNom: window._gpProfData.agent?.nom || 'Admin', profId: String(agentId), noteMax };
+        eleves.forEach((e, i) => {
+          const input = document.getElementById('gpnote-' + i);
+          if (!input || input.value === '') return;
+          const key = e.matricule || e.nom;
+          fsData[key] = { note: parseFloat(input.value), appreciation: '', nom: `${e.nom} ${e.prenom||''}`.trim(), matricule: e.matricule };
+        });
+        await sd(d(db, 'notes_saisies', noteId), fsData);
+      } catch(fsErr) { console.warn('gpProfSaveNotes → Firestore échouée:', fsErr); }
+    })();
 
     const toast = document.getElementById('gp-prof-toast');
     if (toast) {
@@ -4967,7 +5402,11 @@ function initPlatform() {
   updateDashboard();
   syncPersonnelFiches();
 }
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',initPlatform);}else{initPlatform();}
+// initPlatform est appelée par window._fsLoadPromise après chargement Firestore.
+// Appel immédiat si Firestore déjà chargé, sinon on attend.
+if (window._fsLoaded) {
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',initPlatform);}else{initPlatform();}
+}
 
 // Style fix for 2-col grid at small screens
 const style = document.createElement('style');
@@ -4986,7 +5425,7 @@ function applyGuineeLogo(data) {
   const ph = document.getElementById('guinee-logo-placeholder');
   if (img && ph) { img.src = data; img.style.display = 'block'; ph.style.display = 'none'; img.onclick = () => document.getElementById('guinee-logo-input').click(); }
 }
-(function(){ const s = localStorage.getItem('guinee_logo'); if (s) applyGuineeLogo(s); })();
+// Le logo est appliqué automatiquement par _fsLoadPromise après chargement Firestore.
 </script>
 
 <!-- ═══════════════════════════════════════════════════════ -->
@@ -5189,39 +5628,45 @@ function geAppliquerPromotion() {
 
 // ── GE ARCHIVES ANNÉES SCOLAIRES ─────────────────────────────
 function geGetAllArchiveKeys() {
-  const keys = [];
-  for(let i=0;i<localStorage.length;i++){
-    const k=localStorage.key(i);
-    if(k && k.startsWith('ge_archive__')) keys.push(k);
-  }
-  return keys.sort().reverse();
+  // Lire depuis le cache Firestore des archives (peuplé lors du chargement)
+  if (window._geArchivesCache) return Object.keys(window._geArchivesCache).sort().reverse();
+  return [];
 }
 
-function geArchiverAnnee() {
+// Charger les archives depuis Firestore dans le cache
+async function _loadArchivesCache() {
+  try {
+    const all = await FS.getDocs('ge_archives');
+    window._geArchivesCache = all;
+    geRenderArchives();
+  } catch(e) { console.warn('Erreur chargement archives:', e); }
+}
+// Initialiser le cache des archives au démarrage
+window._dbReadyPromise.then(() => _loadArchivesCache());
+
+async function geArchiverAnnee() {
   let label = (document.getElementById('ge-arch-label').value||'').trim();
   if(!label) label = geConfig.annee || new Date().getFullYear()+'-'+(new Date().getFullYear()+1);
   const archType = (document.getElementById('ge-arch-type')?.value)||'annuel';
-  // Construire le suffixe selon le type
   const typeSuffix = archType === 'annuel' ? '' :
     archType === 'p1' ? ` — ${GE_PERIODE_LABELS[0]||'Période 1'}` :
     archType === 'p2' ? ` — ${GE_PERIODE_LABELS[1]||'Période 2'}` :
     ` — ${GE_PERIODE_LABELS[2]||'Période 3'}`;
   const fullLabel = label + typeSuffix;
   const key = 'ge_archive__'+fullLabel.replace(/[^a-zA-Z0-9\-]/g,'_');
-  if(localStorage.getItem(key)) {
+
+  // Vérifier existence dans le cache Firestore
+  if (window._geArchivesCache && window._geArchivesCache[key]) {
     if(!confirm(`Une archive pour "${fullLabel}" existe déjà. Écraser ?`)) return;
   }
-  // Déterminer quels semestres inclure
   const semestresActifs = archType === 'annuel' ? [1,2,3] :
     archType === 'p1' ? [1] : archType === 'p2' ? [2] : [3];
-  // Regrouper les élèves par classe
   const parClasse = {};
   geEtudiants.forEach(e => {
     const cl = e.classe || 'Non définie';
     if(!parClasse[cl]) parClasse[cl] = [];
     parClasse[cl].push(e);
   });
-  // Construire les notes filtrées par les semestres actifs
   const notesParClasse = {};
   Object.keys(parClasse).forEach(cl => {
     notesParClasse[cl] = {};
@@ -5232,38 +5677,29 @@ function geArchiverAnnee() {
       notesParClasse[cl][e.matricule] = notesFiltrees;
     });
   });
-  // Présences par classe
   const presencesParClasse = {};
   Object.keys(parClasse).forEach(cl => {
     presencesParClasse[cl] = {};
     parClasse[cl].forEach(e => {
       Object.keys(gePresences).forEach(pk => {
-        if(pk.startsWith(e.matricule+'-')) {
-          presencesParClasse[cl][pk] = gePresences[pk];
-        }
+        if(pk.startsWith(e.matricule+'-')) presencesParClasse[cl][pk] = gePresences[pk];
       });
     });
   });
-  // Récupérer personnel et présences personnel depuis localStorage
   const personnelSnap = JSON.parse(JSON.stringify(personnel));
   const presPersonnelSnap = JSON.parse(JSON.stringify(presenceData));
-
-  // Filtrer les notes globales selon semestres actifs
   const notesFiltrees = {};
   Object.keys(geNotes).forEach(mat => {
     notesFiltrees[mat] = {};
     semestresActifs.forEach(s => { if(geNotes[mat][`s${s}`]) notesFiltrees[mat][`s${s}`] = geNotes[mat][`s${s}`]; });
   });
-
   const snapshot = {
     label: fullLabel, date: new Date().toISOString(),
     archType, semestresActifs,
     periodeLabels: JSON.parse(JSON.stringify(GE_PERIODE_LABELS)),
     annuelLabel: GE_ANNUEL_LABEL,
     etudiants: JSON.parse(JSON.stringify(geEtudiants)),
-    parClasse,
-    notesParClasse,
-    presencesParClasse,
+    parClasse, notesParClasse, presencesParClasse,
     presences: JSON.parse(JSON.stringify(gePresences)),
     notes: notesFiltrees,
     config: JSON.parse(JSON.stringify(geConfig)),
@@ -5276,23 +5712,27 @@ function geArchiverAnnee() {
     presencesPersonnel: presPersonnelSnap
   };
   try {
-    localStorage.setItem(key, JSON.stringify(snapshot));
+    await FS.setDoc('ge_archives', key, snapshot);
+    if (!window._geArchivesCache) window._geArchivesCache = {};
+    window._geArchivesCache[key] = snapshot;
     const nbClasses = Object.keys(parClasse).length;
     const typeLabel = archType==='annuel'?'Annuelle':archType==='p1'?GE_PERIODE_LABELS[0]:archType==='p2'?GE_PERIODE_LABELS[1]:GE_PERIODE_LABELS[2];
     alert(`✅ Archive "${fullLabel}" créée !\nType : ${typeLabel}\n👥 ${geEtudiants.length} apprenant(s) — ${nbClasses} classe(s)\n👨‍🏫 ${personnelSnap.length} agent(s) du personnel`);
     geRenderArchives();
     document.getElementById('ge-arch-label').value='';
   } catch(e) {
-    alert('❌ Erreur lors de l\'archivage. Le stockage est peut-être plein.');
+    alert('❌ Erreur lors de l\'archivage Firestore : ' + e.message);
   }
 }
 
 function geRenderArchives() {
   const c = document.getElementById('ge-archives-list'); if(!c) return;
-  const keys = geGetAllArchiveKeys();
+  const cache = window._geArchivesCache || {};
+  const keys = Object.keys(cache).sort().reverse();
   if(!keys.length) { c.innerHTML='<p style="color:#7a85a3;font-size:0.85rem;">Aucune archive disponible.</p>'; return; }
   c.innerHTML = keys.map(k=>{
-    let snap; try{ snap=JSON.parse(localStorage.getItem(k)); } catch(e){ return ''; }
+    const snap = cache[k];
+    if (!snap) return '';
     const d = snap.date ? new Date(snap.date).toLocaleDateString('fr-FR',{day:'2-digit',month:'long',year:'numeric'}) : '—';
     const nb = snap.etudiants ? snap.etudiants.length : '?';
     const nbCl = snap.parClasse ? Object.keys(snap.parClasse).length : '?';
@@ -5328,10 +5768,12 @@ function geRenderArchives() {
 let geArchiveOnglet = 'classes';
 
 function geConsulterArchive(key) {
-  let snap; try{ snap=JSON.parse(localStorage.getItem(key)); } catch(e){ alert('Archive corrompue.'); return; }
+  const snap = (window._geArchivesCache || {})[key];
+  if (!snap) { alert('Archive introuvable.'); return; }
   geCurrentArchiveKey = key;
   geArchiveOnglet = 'classes';
   document.getElementById('ge-arch-modal-title').textContent = `📂 Archive — ${snap.label||key}`;
+  window._archSnap = snap;
   geRenderArchiveModal(snap);
   geOpenModal('ge-modal-archive-view');
 }
@@ -5536,7 +5978,8 @@ function geExportArchiveCSV() {
   geExportArchiveCSVDirect(geCurrentArchiveKey);
 }
 function geExportArchiveCSVDirect(key) {
-  let snap; try{ snap=JSON.parse(localStorage.getItem(key)); } catch(e){ alert('Archive corrompue.'); return; }
+  const snap = (window._geArchivesCache || {})[key];
+  if (!snap) { alert('Archive introuvable.'); return; }
   const etuds = snap.etudiants||[];
   if(!etuds.length) { alert('Aucun apprenant dans cette archive.'); return; }
   const headers=['Matricule','Nom','Prénom','Sexe','Date Naiss.','Lieu','Option','Classe','Statut','Tuteur','Tél. Tuteur'];
@@ -5546,7 +5989,8 @@ function geExportArchiveCSVDirect(key) {
   a.download=`Archive_ETFP_${snap.label||key}_${new Date().toISOString().slice(0,10)}.csv`; a.click();
 }
 function geExportArchivePersonnelCSV(key) {
-  let snap; try{ snap=JSON.parse(localStorage.getItem(key)); } catch(e){ alert('Archive corrompue.'); return; }
+  const snap = (window._geArchivesCache || {})[key];
+  if (!snap) { alert('Archive introuvable.'); return; }
   const pers = snap.personnel||[];
   if(!pers.length) { alert('Aucun agent dans cette archive.'); return; }
   const headers=['Matricule','Nom & Prénom(s)','Spécialité','Contrat','Date embauche','Classe','H/sem','Téléphone','Email','Sexe'];
@@ -5574,7 +6018,8 @@ function _getPrintArchiveStyles() {
 }
 
 function gePrintArchiveDirect(key, type) {
-  let snap; try{ snap=JSON.parse(localStorage.getItem(key)); } catch(e){ alert('Archive corrompue.'); return; }
+  const snap = (window._geArchivesCache || {})[key];
+  if (!snap) { alert('Archive introuvable.'); return; }
   const entete = _getEnteteHTML();
   const label = snap.label || key;
   const etuds = snap.etudiants||[];
@@ -5693,7 +6138,8 @@ function gePrintArchive() {
 }
 function geRestaurerArchive() {
   if(!geCurrentArchiveKey) return;
-  let snap; try{ snap=JSON.parse(localStorage.getItem(geCurrentArchiveKey)); } catch(e){ alert('Archive corrompue.'); return; }
+  const snap = (window._geArchivesCache || {})[geCurrentArchiveKey];
+  if (!snap) { alert('Archive introuvable.'); return; }
   if(!confirm(`⚠️ ATTENTION : Restaurer l'archive "${snap.label}" va REMPLACER toutes les données actives actuelles (apprenants, notes, présences).\n\nIl est recommandé d'archiver d'abord l'année en cours.\n\nContinuer quand même ?`)) return;
   geEtudiants = snap.etudiants||[];
   gePresences  = snap.presences||{};
@@ -5705,10 +6151,17 @@ function geRestaurerArchive() {
   geSave(); geCloseModal('ge-modal-archive-view'); geRefreshAll();
   alert(`✅ Archive "${snap.label}" restaurée avec succès !\n${geEtudiants.length} apprenant(s) rechargé(s).`);
 }
-function geSupprimerArchive(key) {
-  let label = key; try{ const s=JSON.parse(localStorage.getItem(key)); label=s.label||key; } catch(e){}
+async function geSupprimerArchive(key) {
+  const cache = window._geArchivesCache || {};
+  const label = cache[key] ? (cache[key].label || key) : key;
   if(!confirm(`Supprimer définitivement l'archive "${label}" ?\nCette action est irréversible.`)) return;
-  localStorage.removeItem(key); geRenderArchives();
+  try {
+    await FS.deleteDoc('ge_archives', key);
+    if (window._geArchivesCache) delete window._geArchivesCache[key];
+    geRenderArchives();
+  } catch(e) {
+    alert('❌ Erreur suppression Firestore : ' + e.message);
+  }
 }
 
 // Init promotion & archives au démarrage
@@ -5805,11 +6258,156 @@ function geShowPage(id, navEl) {
   document.querySelectorAll('.ge-nav-item').forEach(n=>n.classList.remove('ge-active'));
   document.getElementById(id).classList.add('ge-active');
   if(navEl) navEl.classList.add('ge-active');
-  if(id === 'ge-interclasses') icRender();
-  else if(id === 'ge-bulletins') { geUpdateBulletinSelects(); geRenderBulletins(); }
-  else if(id === 'ge-fiche-eleve') { geFicheInitSelects(); }
+
+  if(id === 'ge-interclasses') {
+    // Sync notes profs avant comparaison interclasse
+    geSyncNotesFromFirestore().then(() => icRender());
+  }
+  else if(id === 'ge-bulletins') {
+    geUpdateBulletinSelects();
+    geSyncNotesFromFirestore().then(() => geRenderBulletins());
+  }
+  else if(id === 'ge-fiche-eleve') {
+    geSyncNotesFromFirestore().then(() => geFicheInitSelects());
+  }
+  else if(id === 'ge-notes' || id === 'ge-recap') {
+    // Sync notes profs avant affichage Notes & Matières / Récapitulatif
+    geSyncNotesFromFirestore().then(() => geRefreshAll());
+  }
+  else if(id === 'ge-passage') {
+    // Sync notes profs avant calcul de passage automatique
+    geSyncNotesFromFirestore().then(() => {
+      if(typeof gePreviewPromotion === 'function') gePreviewPromotion();
+    });
+  }
+  else if(id === 'ge-archives') {
+    // Sync notes profs avant archivage
+    geSyncNotesFromFirestore().then(() => {
+      if(typeof geRenderArchives === 'function') geRenderArchives();
+    });
+  }
   else geRefreshAll();
 }
+
+// ── Synchronisation Firestore notes_saisies → geNotes (ge_notes) ──────────
+// Lit toutes les notes saisies par les profs et les injecte dans geNotes
+// (variable globale) et ge_notes (localStorage/cache) pour que les
+// bulletins, fiches et moyennes soient à jour automatiquement.
+window.geSyncNotesFromFirestore = async function() {
+  try {
+    const db = await window._dbReadyPromise;
+    const { getDocs, collection } = { getDocs: window._fsGetDocs, collection: window._fsCollection };
+    if (!getDocs || !collection) return;
+
+    const snap = await getDocs(collection(db, 'notes_saisies'));
+    // Ne pas sortir si vide : garantit cohérence avec geNotes
+
+    // Index nom (lowercase) → matricule — fallback pour anciennes données
+    const nomToMatricule = {};
+    geEtudiants.forEach(e => {
+      const full = `${e.nom||''} ${e.prenom||''}`.trim().toLowerCase();
+      nomToMatricule[full] = e.matricule;
+    });
+
+    const periodeMap = { T1:'s1', T2:'s2', T3:'s3' };
+    let nbInjecte = 0;
+
+    if (!snap.empty) snap.forEach(d => {
+      const data = d.data();
+      if (!data.classe || !data.matiere || !data.periode) return;
+      const gePerKey = periodeMap[data.periode] || data.periode;
+
+      Object.entries(data).forEach(([key, val]) => {
+        if (['classe','matiere','periode','profNom','profId','noteMax'].includes(key)) return;
+        if (typeof val !== 'object' || val === null || val.note === undefined) return;
+
+        const note = parseFloat(val.note);
+        if (isNaN(note)) return;
+
+        // Résolution du matricule : champ val.matricule (nouveau) ou key lui-même ou mapping par nom
+        let mat = val.matricule || '';
+        if (!mat) {
+          // key est peut-être un matricule direct
+          const matchByMat = geEtudiants.find(e => e.matricule === key);
+          if (matchByMat) mat = key;
+          else mat = nomToMatricule[key.toLowerCase()] || nomToMatricule[(val.nom||'').toLowerCase()] || '';
+        }
+        if (!mat) return;
+
+        if (!geNotes[mat]) geNotes[mat] = {};
+        if (!geNotes[mat][gePerKey]) geNotes[mat][gePerKey] = {};
+        // Pour les classes primaires : normaliser la clé matière avec préfixe prim_
+        const etudSync = geEtudiants.find(e => e.matricule === mat);
+        const isPrimSync = etudSync ? (typeof geIsPrimaire === 'function' ? geIsPrimaire(etudSync.classe) : false) : false;
+        let matiereKey = data.matiere;
+        if (isPrimSync && matiereKey && !matiereKey.startsWith('prim_')) {
+          matiereKey = 'prim_' + matiereKey.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'');
+        }
+        if (geNotes[mat][gePerKey][matiereKey] !== note) {
+          geNotes[mat][gePerKey][matiereKey] = note;
+          nbInjecte++;
+        }
+      });
+    });
+
+    if (nbInjecte > 0) {
+      localStorage.setItem('ge_notes', JSON.stringify(geNotes));
+      console.log(`✅ geSyncNotesFromFirestore : ${nbInjecte} note(s) synchronisée(s).`);
+      if (typeof showToast === 'function') showToast(`🔄 ${nbInjecte} note(s) prof synchronisée(s).`);
+      // Mettre à jour les listes GE_MATIERES / GE_MATIERES_PRIMAIRE après injection
+      if (typeof geSyncMatieresDepuisNotes === 'function') geSyncMatieresDepuisNotes();
+    }
+  } catch(err) {
+    console.warn('geSyncNotesFromFirestore échouée:', err);
+  }
+};
+
+// ── ÉCOUTE TEMPS RÉEL : notes_saisies → sync auto côté admin ──────────────
+window._geNotesUnsubscribe = null;
+window._geStartNotesListener = function() {
+  try {
+    const db = window._db;
+    if (!db || !window._fsOnSnapshot || !window._fsCollection) return;
+    if (window._geNotesUnsubscribe) return;
+    window._geNotesUnsubscribe = window._fsOnSnapshot(
+      window._fsCollection(db, 'notes_saisies'),
+      async (snap) => {
+        if (!snap || (snap.metadata && snap.metadata.hasPendingWrites)) return;
+        await window.geSyncNotesFromFirestore();
+        const activePage = document.querySelector('.ge-page.ge-active');
+        if (!activePage) return;
+        const pid = activePage.id;
+        if (pid === 'ge-notes' || pid === 'ge-recap') geRefreshAll();
+        else if (pid === 'ge-bulletins') geRenderBulletins();
+        else if (pid === 'ge-fiche-eleve') { if(typeof geFicheRender==='function') geFicheRender(); }
+        else if (pid === 'ge-interclasses') icRender();
+        else if (pid === 'ge-passage') { if(typeof gePreviewPromotion==='function') gePreviewPromotion(); }
+        else if (pid === 'ge-dashboard') { if(typeof geRenderDashboard==='function') geRenderDashboard(); }
+        else if (pid === 'ge-archives') { if(typeof geRenderArchives==='function') geRenderArchives(); }
+        // ── Gestion du Personnel (système de pages séparé) ──
+        const personnelPage = document.getElementById('page-gestion-personnel');
+        if (personnelPage && personnelPage.classList.contains('active')) {
+          const activeSub = document.querySelector('.gp-page.gp-active');
+          if (activeSub) {
+            const subId = activeSub.id;
+            if (subId === 'gp-personnel' && typeof renderPersonnelTable === 'function') renderPersonnelTable();
+            else if (subId === 'gp-dashboard' && typeof updateDashboard === 'function') updateDashboard();
+            else if (subId === 'gp-presence' && typeof renderPresence === 'function') renderPresence();
+            else if (subId === 'gp-appreciations' && typeof syncPersonnelFiches === 'function') syncPersonnelFiches();
+          }
+        }
+        // ── Archives du personnel ──
+        const archivesPage = document.getElementById('page-archives');
+        if (archivesPage && archivesPage.classList.contains('active')) {
+          if (typeof archivesRender === 'function') archivesRender();
+        }
+      },
+      (err) => { console.warn('Listener notes_saisies:', err); }
+    );
+    console.log('📡 Écoute temps réel notes_saisies activée.');
+  } catch(e) { console.warn('_geStartNotesListener:', e); }
+};
+
 function geRefreshAll() {
   geRenderDashboard(); geRenderEtudiants(); geRenderPresences();
   geRenderNotes(); geRenderRecap();
@@ -5915,8 +6513,88 @@ function geSaveEtudiant() {
   updateWelcomeKPIs();
   // Sync vers l'interface professeur
   if (typeof window.geSyncEtudiantsToFirestore === 'function') window.geSyncEtudiantsToFirestore();
+  // Sync vers Gestion du Personnel
+  geSyncEtudiantVersPersonnel(etud);
   // Rafraîchir la fiche si elle est active
   if(document.getElementById('ge-fiche-eleve')?.classList.contains('ge-active')) geFicheInitSelects();
+}
+
+// ── SYNC INITIALE : tous les élèves existants → personnel ──
+function geSyncTousEtudiantsVersPersonnel() {
+  if (typeof personnel === 'undefined' || typeof geEtudiants === 'undefined') return;
+  if (!geEtudiants.length) return;
+  let changed = false;
+  geEtudiants.forEach(etud => {
+    const nomComplet = `${etud.nom} ${etud.prenom}`.trim();
+    const existing = personnel.find(a => a.mat === etud.matricule);
+    if (!existing) {
+      personnel.push({
+        id:        Date.now() + Math.floor(Math.random() * 10000),
+        mat:       etud.matricule,
+        nom:       nomComplet,
+        spe:       etud.option || '',
+        grade:     '',
+        contrat:   etud.statut || 'Élève',
+        statut:    etud.statut || 'Élève',
+        date:      '',
+        classe:    etud.classe || '',
+        heures:    '',
+        tel:       etud.telTuteur || '',
+        email:     '',
+        sexe:      etud.sexe || '',
+        naissance: etud.dob || '',
+        obs:       'Synchronisé depuis Gestion des Élèves',
+      });
+      changed = true;
+    }
+  });
+  if (changed) {
+    localStorage.setItem('mpua_personnel', JSON.stringify(personnel));
+    if (typeof renderPersonnelTable === 'function') renderPersonnelTable();
+    if (typeof syncPersonnelFiches  === 'function') syncPersonnelFiches();
+  }
+}
+// Quand un élève est ajouté/modifié dans Gestion des Élèves,
+// il est automatiquement créé ou mis à jour dans Gestion du Personnel.
+function geSyncEtudiantVersPersonnel(etud) {
+  if (typeof personnel === 'undefined') return;
+  const nomComplet = `${etud.nom} ${etud.prenom}`.trim();
+  // Chercher par matricule (champ mat dans personnel)
+  const existing = personnel.find(a => a.mat === etud.matricule);
+  if (existing) {
+    // Mettre à jour les champs synchronisables
+    existing.nom      = nomComplet;
+    existing.sexe     = etud.sexe || existing.sexe;
+    existing.naissance= etud.dob  || existing.naissance;
+    existing.classe   = etud.classe || existing.classe;
+    existing.tel      = etud.telTuteur || existing.tel;
+    existing.spe      = etud.option || existing.spe;
+    existing.statut   = etud.statut || existing.statut;
+    existing.contrat  = etud.statut || existing.contrat;
+  } else {
+    // Créer un nouvel agent
+    personnel.push({
+      id:        Date.now() + Math.floor(Math.random() * 1000),
+      mat:       etud.matricule,
+      nom:       nomComplet,
+      spe:       etud.option || '',
+      grade:     '',
+      contrat:   etud.statut || 'Élève',
+      statut:    etud.statut || 'Élève',
+      date:      '',
+      classe:    etud.classe || '',
+      heures:    '',
+      tel:       etud.telTuteur || '',
+      email:     '',
+      sexe:      etud.sexe || '',
+      naissance: etud.dob || '',
+      obs:       `Synchronisé depuis Gestion des Élèves`,
+    });
+  }
+  localStorage.setItem('mpua_personnel', JSON.stringify(personnel));
+  if (typeof renderPersonnelTable === 'function') renderPersonnelTable();
+  if (typeof syncPersonnelFiches  === 'function') syncPersonnelFiches();
+  if (typeof updateWelcomeKPIs    === 'function') updateWelcomeKPIs();
 }
 function geEditEtudiant(idx) {
   const e = geEtudiants[idx];
@@ -5950,10 +6628,22 @@ function geEditEtudiant(idx) {
 }
 function geDeleteEtudiant(idx) {
   if(!confirm(`Supprimer ${geEtudiants[idx].nom} ${geEtudiants[idx].prenom} ?`)) return;
+  const etud = geEtudiants[idx];
   geEtudiants.splice(idx,1); geSave();
   geRenderEtudiants(); geRenderDashboard();
   updateWelcomeKPIs();
   if (typeof window.geSyncEtudiantsToFirestore === 'function') window.geSyncEtudiantsToFirestore();
+  // Retirer du personnel si présent
+  if (typeof personnel !== 'undefined') {
+    const before = personnel.length;
+    personnel = personnel.filter(a => a.mat !== etud.matricule);
+    if (personnel.length !== before) {
+      localStorage.setItem('mpua_personnel', JSON.stringify(personnel));
+      if (typeof renderPersonnelTable === 'function') renderPersonnelTable();
+      if (typeof syncPersonnelFiches  === 'function') syncPersonnelFiches();
+      if (typeof updateWelcomeKPIs    === 'function') updateWelcomeKPIs();
+    }
+  }
 }
 // ── MESSAGE WHATSAPP PARENT ────────────────────────────────
 function geBuildMsgParent(e) {
@@ -7835,30 +8525,32 @@ function exportExcelPersonnel() {
 // ═══════════════════════════════════════════════════════════
 // IMAGE DE FOND
 // ═══════════════════════════════════════════════════════════
-(function bgInit() {
+function _applyBgFromCache() {
   const overlay = document.getElementById('bg-overlay');
   if (!overlay) return;
-  const saved   = localStorage.getItem('bg_image');
-  const opacity = localStorage.getItem('bg_opacity') || '20';
+  const saved    = localStorage.getItem('bg_image');
+  const opacity  = localStorage.getItem('bg_opacity') || '20';
   const position = localStorage.getItem('bg_position') || 'center';
-  const size    = localStorage.getItem('bg_size') || 'cover';
+  const size     = localStorage.getItem('bg_size') || 'cover';
   if (saved) {
     overlay.style.backgroundImage = `url(${saved})`;
     overlay.style.opacity = opacity / 100;
   }
   overlay.style.backgroundPosition = position;
   overlay.style.backgroundSize = size;
-  document.addEventListener('DOMContentLoaded', function() {
-    const sl     = document.getElementById('bg-opacity-slider');
-    const val    = document.getElementById('bg-opacity-val');
-    const posSel = document.getElementById('bg-position-sel');
-    const sizeSel= document.getElementById('bg-size-sel');
-    if (sl)      sl.value = opacity;
-    if (val)     val.textContent = opacity + '%';
-    if (posSel)  posSel.value = position;
-    if (sizeSel) sizeSel.value = size;
-  });
-})();
+  const sl     = document.getElementById('bg-opacity-slider');
+  const val    = document.getElementById('bg-opacity-val');
+  const posSel = document.getElementById('bg-position-sel');
+  const sizeSel= document.getElementById('bg-size-sel');
+  if (sl)      sl.value = opacity;
+  if (val)     val.textContent = opacity + '%';
+  if (posSel)  posSel.value = position;
+  if (sizeSel) sizeSel.value = size;
+}
+// Appelée par _fsLoadPromise après chargement Firestore
+document.addEventListener('DOMContentLoaded', function() {
+  if (window._fsLoaded) _applyBgFromCache();
+});
 
 function bgTogglePanel() {
   document.getElementById('bg-panel').classList.toggle('open');
@@ -7872,8 +8564,7 @@ function bgLoadImage(input) {
     overlay.style.backgroundImage = `url(${e.target.result})`;
     const op = document.getElementById('bg-opacity-slider').value;
     overlay.style.opacity = op / 100;
-    try { localStorage.setItem('bg_image', e.target.result); }
-    catch(err) { showToast('⚠️ Image trop lourde pour être mémorisée. Active jusqu\'au rechargement.'); return; }
+    localStorage.setItem('bg_image', e.target.result);
     showToast('✅ Image de fond appliquée.');
   };
   reader.readAsDataURL(file);
@@ -7962,8 +8653,10 @@ function _getEnteteExcelRows(titre, nbCols) {
   return { rows, merges, headerCount: rows.length };
 }
 
-geLoad();
-geSyncMatieresDepuisNotes(); // Sync les matières saisies par les profs → GE_MATIERES
+// geLoad() et geSyncMatieresDepuisNotes() sont maintenant appelés
+// automatiquement par window._fsLoadPromise après chargement Firestore.
+// Un appel synchrone initial pour les données déjà en cache (si disponibles).
+if (window._fsLoaded) { geLoad(); geSyncMatieresDepuisNotes(); }
 
 // ── MENU EXPORT EXCEL ──────────────────────────────────────
 function toggleExcelMenu(e) {
@@ -9539,7 +10232,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 </script>
-</body></html>
 
 <!-- ═══════════════════════════════════════════════════════ -->
 <!--  SCRIPT : EMPLOI DU TEMPS PRIMAIRE                      -->
@@ -9720,7 +10412,7 @@ import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12
 import {
   getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, setDoc, getDoc, getDocs,
-  addDoc, deleteDoc, query, where,
+  addDoc, deleteDoc, query, where, onSnapshot,
   enableNetwork, disableNetwork
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
@@ -9745,30 +10437,105 @@ try {
   db = getFirestore(app);
 }
 
+// ── Exposition globale de db et des helpers Firestore ─────
+window._db = db;
+window._fsSetDoc   = setDoc;
+window._fsGetDoc   = getDoc;
+window._fsGetDocs  = getDocs;
+window._fsAddDoc   = addDoc;
+window._fsDeleteDoc= deleteDoc;
+window._fsDoc      = doc;
+window._fsCollection = collection;
+window._fsQuery    = query;
+window._fsWhere    = where;
+window._fsOnSnapshot = onSnapshot;
+
+// ── Résolution de la Promise db_ready ─────────────────────
+if (window._dbReadyResolve) window._dbReadyResolve(db);
+
+// ── Démarrage de l'écoute temps réel notes_saisies ────────
+// (actif uniquement en mode admin, pas en mode prof ?prof=ID)
+if (!new URLSearchParams(window.location.search).get('prof')) {
+  if (typeof window._geStartNotesListener === 'function') {
+    window._geStartNotesListener();
+  } else {
+    // Au cas où le script principal n'est pas encore chargé
+    window.addEventListener('load', () => {
+      if (typeof window._geStartNotesListener === 'function') window._geStartNotesListener();
+    });
+  }
+}
+
 // ── Indicateur de statut connexion ────────────────────────
 (function() {
+  // Injection du style pulse
+  const styleEl = document.createElement('style');
+  styleEl.textContent = `
+    @keyframes _pulse_dot {
+      0%,100% { opacity:1; transform:scale(1); }
+      50%      { opacity:.5; transform:scale(1.5); }
+    }
+    @keyframes _slide_in {
+      from { opacity:0; transform:translateX(60px); }
+      to   { opacity:1; transform:translateX(0); }
+    }
+    @keyframes _slide_out {
+      from { opacity:1; transform:translateX(0); }
+      to   { opacity:0; transform:translateX(60px); }
+    }
+    #sync-status-badge { pointer-events:none; }
+    #sync-status-badge .dot {
+      width:9px; height:9px; border-radius:50%;
+      background:#2d7a4f;
+      animation: _pulse_dot 1.6s ease-in-out infinite;
+      flex-shrink:0;
+    }
+  `;
+  document.head.appendChild(styleEl);
+
   const badge = document.createElement('div');
   badge.id = 'sync-status-badge';
-  badge.style.cssText = 'position:fixed;bottom:80px;right:18px;z-index:9999;padding:6px 14px;border-radius:20px;font-family:\'DM Sans\',sans-serif;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;box-shadow:0 2px 10px rgba(0,0,0,0.2);transition:all 0.4s;';
+  badge.style.cssText = [
+    'position:fixed',
+    'bottom:80px',
+    'right:18px',
+    'z-index:9999',
+    'padding:8px 16px',
+    'border-radius:24px',
+    "font-family:'DM Sans',sans-serif",
+    'font-size:12px',
+    'font-weight:700',
+    'display:flex',
+    'align-items:center',
+    'gap:8px',
+    'box-shadow:0 4px 16px rgba(45,122,79,0.25)',
+    'background:linear-gradient(135deg,#e8f5e9,#f1fff4)',
+    'color:#1b5e3a',
+    'border:1.5px solid #a5d6a7',
+    'opacity:0',
+  ].join(';');
   document.body.appendChild(badge);
 
-  function updateBadge(online) {
-    if (online) {
-      badge.innerHTML = '🟢 Connecté — synchronisé';
-      badge.style.background = '#e8f5e9';
-      badge.style.color = '#2d7a4f';
-      badge.style.border = '1px solid #a5d6a7';
-    } else {
-      badge.innerHTML = '🔴 Hors-ligne — données locales';
-      badge.style.background = '#fff3e0';
-      badge.style.color = '#b87d1a';
-      badge.style.border = '1px solid #ffcc80';
-    }
+  let _hideTimer = null;
+
+  function showOnline() {
+    if (_hideTimer) clearTimeout(_hideTimer);
+    badge.innerHTML = '<span class="dot"></span>En ligne — Firebase synchronisé';
+    badge.style.animation = '_slide_in 0.4s ease forwards';
+    _hideTimer = setTimeout(() => {
+      badge.style.animation = '_slide_out 0.4s ease forwards';
+    }, 4000);
   }
 
-  updateBadge(navigator.onLine);
-  window.addEventListener('online',  () => { updateBadge(true);  enableNetwork(db).catch(()=>{}); });
-  window.addEventListener('offline', () => { updateBadge(false); disableNetwork(db).catch(()=>{}); });
+  function showOffline() {
+    if (_hideTimer) clearTimeout(_hideTimer);
+    badge.style.animation = '_slide_out 0.3s ease forwards';
+  }
+
+  if (navigator.onLine) setTimeout(showOnline, 800);
+
+  window.addEventListener('online',  () => { enableNetwork(db).catch(()=>{}); showOnline(); });
+  window.addEventListener('offline', () => { disableNetwork(db).catch(()=>{}); showOffline(); });
 })();
 
 // ── Détection mode PROF (lien ?prof=ID) ──────────────────
@@ -9809,10 +10576,29 @@ async function lancerInterfaceProf(profId) {
   clsSnap.forEach(d => { allClasses[d.id] = d.data(); });
 
   async function render() {
-    let classeKey = null, eleves = [];
+    let classeKey = null, elevesRaw = [];
     for (const [k, v] of Object.entries(allClasses)) {
-      if (v.nom === selectedClasse) { classeKey = k; eleves = v.eleves || []; break; }
+      if (v.nom === selectedClasse) { classeKey = k; elevesRaw = v.eleves || []; break; }
     }
+    // Normaliser : ancien format = strings, nouveau format = {nom, matricule}
+    const eleves = elevesRaw.map(el =>
+      typeof el === 'string' ? { nom: el, matricule: '' } : { nom: el.nom || '', matricule: el.matricule || '' }
+    );
+
+    // ── Détection primaire (/10) ou secondaire (/20) ──────────
+    const _isPrim = (function(c) {
+      if (!c) return false;
+      const cl = c.trim().toLowerCase();
+      if (/\b(cp[12]?|ce[12]?|cm[12]?)\b/i.test(cl)) return true;
+      if (/\bcours\s*(préparatoire|elementaire|élémentaire|moyen)\b/i.test(cl)) return true;
+      if (/^(1[eèê]re?|[2-6][eèê]me?)\s*(ann[eé]e?)?/i.test(cl) && !/\b(coll[eè]ge|lyc[eé]e|seconde|terminal|terminale|bac)\b/i.test(cl)) return true;
+      return false;
+    })(selectedClasse);
+    const _noteMax  = _isPrim ? 10 : 20;
+    const _noteStep = _isPrim ? 0.5 : 0.25;
+    const _niveauBadge = _isPrim
+      ? `<span style="background:#e8f5e9;color:#2d7a4f;border-radius:8px;padding:3px 10px;font-size:11px;font-weight:700">🎒 Primaire — /10</span>`
+      : `<span style="background:#e3f0ff;color:#1a56b0;border-radius:8px;padding:3px 10px;font-size:11px;font-weight:700">🏫 Secondaire — /20</span>`;
 
     document.body.innerHTML = `
     <div style="font-family:'DM Sans',sans-serif;background:#faf8f4;min-height:100vh;padding:0 0 40px">
@@ -9833,9 +10619,10 @@ async function lancerInterfaceProf(profId) {
             </div>
           </div>
         </div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;align-items:flex-end">
           <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px">
             <label style="font-size:12px;color:#5a4f45;font-weight:600">Classe</label>
-            <select id="pf-classe" style="padding:8px 12px;border-radius:8px;border:1.5px solid #e8e4dd;font-family:'DM Sans',sans-serif;font-size:13px">
+            <select id="pf-classe" onchange="window._profRefresh()" style="padding:8px 12px;border-radius:8px;border:1.5px solid #e8e4dd;font-family:'DM Sans',sans-serif;font-size:13px">
               ${profClasses.map(c=>`<option value="${c}"${c===selectedClasse?' selected':''} >${c}</option>`).join('')}
             </select>
           </div>
@@ -9853,15 +10640,17 @@ async function lancerInterfaceProf(profId) {
               <option value="T3"${selectedPeriode==='T3'?' selected':''}>3ème Trimestre</option>
             </select>
           </div>
-          <div style="display:flex;align-items:flex-end">
+          <div style="display:flex;align-items:flex-end;gap:8px">
+            ${_niveauBadge}
             <button onclick="window._profRefresh()" style="background:#0d2137;color:white;border:none;padding:8px 18px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer">🔄 Charger</button>
           </div>
         </div>
 
         ${eleves.length === 0 ? `<div style="background:white;border-radius:14px;padding:32px;text-align:center;color:#a09080;font-size:14px">Aucun élève dans cette classe.<br>Contactez l'administration.</div>` : `
         <div style="background:white;border-radius:14px;border:1px solid #e8e4dd;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.06)">
-          <div style="background:#0d2137;color:white;padding:12px 20px;font-size:13px;font-weight:700">
-            📋 ${selectedClasse} — ${selectedMatiere} — ${selectedPeriode==='T1'?'1er':selectedPeriode==='T2'?'2ème':'3ème'} Trimestre
+          <div style="background:#0d2137;color:white;padding:12px 20px;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:space-between">
+            <span>📋 ${selectedClasse} — ${selectedMatiere} — ${selectedPeriode==='T1'?'1er':selectedPeriode==='T2'?'2ème':'3ème'} Trimestre</span>
+            <span style="font-size:11px;opacity:.8">${_isPrim?'Barème /10':'Barème /20'}</span>
           </div>
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -9869,7 +10658,7 @@ async function lancerInterfaceProf(profId) {
                 <tr style="background:#f4f2ee">
                   <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">N°</th>
                   <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">ÉLÈVE</th>
-                  <th style="padding:10px 16px;text-align:center;font-size:11px;color:#5a4f45">NOTE /20</th>
+                  <th style="padding:10px 16px;text-align:center;font-size:11px;color:#5a4f45">NOTE /${_noteMax}</th>
                   <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">APPRÉCIATION</th>
                 </tr>
               </thead>
@@ -9877,9 +10666,9 @@ async function lancerInterfaceProf(profId) {
                 ${eleves.map((el,i)=>`
                 <tr style="border-top:1px solid #f4f2ee">
                   <td style="padding:10px 16px;color:#a09080;font-size:12px">${i+1}</td>
-                  <td style="padding:10px 16px;font-weight:600;color:#0d2137">${el}</td>
+                  <td style="padding:10px 16px;font-weight:600;color:#0d2137">${el.nom}</td>
                   <td style="padding:8px 16px;text-align:center">
-                    <input type="number" id="note-${i}" min="0" max="20" step="0.25" placeholder="—"
+                    <input type="number" id="note-${i}" data-matricule="${el.matricule}" min="0" max="${_noteMax}" step="${_noteStep}" placeholder="—"
                       style="width:70px;padding:6px 8px;border-radius:8px;border:1.5px solid #e8e4dd;text-align:center;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700">
                   </td>
                   <td style="padding:8px 16px">
@@ -9908,17 +10697,23 @@ async function lancerInterfaceProf(profId) {
       </div>
     </div>`;
 
-    // Restaurer notes déjà saisies
-    const noteId = `${profId}_${selectedClasse}_${selectedMatiere}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
+    // Restaurer notes déjà saisies — clé = matricule (priorité) ou nom (fallback ancien format)
+    // Même normalisation pour retrouver les notes existantes
+    const _matiereKeyRestore = (_isPrim && selectedMatiere && !selectedMatiere.startsWith('prim_'))
+      ? 'prim_' + selectedMatiere.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'')
+      : selectedMatiere;
+    const noteId = `${profId}_${selectedClasse}_${_matiereKeyRestore}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
     const savedSnap = await getDoc(doc(db, 'notes_saisies', noteId));
     if (savedSnap.exists()) {
       const saved = savedSnap.data();
       eleves.forEach((el, i) => {
-        if (saved[el]) {
+        // Chercher par matricule d'abord, puis par nom (rétrocompatibilité)
+        const entry = saved[el.matricule] || saved[el.nom] || null;
+        if (entry) {
           const ni = document.getElementById(`note-${i}`);
           const ai = document.getElementById(`appr-${i}`);
-          if (ni && saved[el].note !== undefined) ni.value = saved[el].note;
-          if (ai) ai.value = saved[el].appreciation || '';
+          if (ni && entry.note !== undefined) ni.value = entry.note;
+          if (ai) ai.value = entry.appreciation || '';
         }
       });
     }
@@ -9931,16 +10726,54 @@ async function lancerInterfaceProf(profId) {
     };
 
     window._profSaveNotes = async () => {
-      const noteId = `${profId}_${selectedClasse}_${selectedMatiere}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
-      const data = { classe: selectedClasse, matiere: selectedMatiere, periode: selectedPeriode, profNom: prof.nom, profId };
+      // Pour les classes primaires : normaliser la clé matière avec préfixe prim_
+      const _matiereKey = (_isPrim && selectedMatiere && !selectedMatiere.startsWith('prim_'))
+        ? 'prim_' + selectedMatiere.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'')
+        : selectedMatiere;
+      const noteId = `${profId}_${selectedClasse}_${_matiereKey}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
+      const data = { classe: selectedClasse, matiere: _matiereKey, periode: selectedPeriode, profNom: prof.nom, profId, noteMax: _noteMax };
       eleves.forEach((el, i) => {
         const noteVal = document.getElementById(`note-${i}`)?.value;
         const apprVal = document.getElementById(`appr-${i}`)?.value;
-        if (noteVal !== '') data[el] = { note: parseFloat(noteVal), appreciation: apprVal };
+        if (noteVal !== '' && noteVal !== undefined) {
+          const key = el.matricule || el.nom; // matricule prioritaire, nom en fallback
+          data[key] = { note: parseFloat(noteVal), appreciation: apprVal, nom: el.nom, matricule: el.matricule };
+        }
       });
       await setDoc(doc(db, 'notes_saisies', noteId), data);
+
+      // ── Synchronisation directe vers ge_notes (par matricule) ──
+      try {
+        const periodeMap = { T1:'s1', T2:'s2', T3:'s3' };
+        const gePerKey = periodeMap[selectedPeriode] || selectedPeriode;
+        let geNotes = {};
+        try { geNotes = JSON.parse(localStorage.getItem('ge_notes') || '{}'); } catch {}
+        let nbSync = 0;
+        eleves.forEach((el, i) => {
+          const noteVal = document.getElementById(`note-${i}`)?.value;
+          if (noteVal === '' || noteVal === undefined) return;
+          const noteNum = parseFloat(noteVal);
+          if (isNaN(noteNum)) return;
+          const mat = el.matricule;
+          if (!mat) return; // pas de matricule = on ne peut pas injecter
+          if (!geNotes[mat]) geNotes[mat] = {};
+          if (!geNotes[mat][gePerKey]) geNotes[mat][gePerKey] = {};
+          // Pour les classes primaires : préfixe prim_ sur la clé matière
+          let matKey = selectedMatiere;
+          if (_isPrim && matKey && !matKey.startsWith('prim_')) {
+            matKey = 'prim_' + matKey.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'');
+          }
+          geNotes[mat][gePerKey][matKey] = noteNum;
+          nbSync++;
+        });
+        if (nbSync > 0) {
+          localStorage.setItem('ge_notes', JSON.stringify(geNotes));
+          if (typeof window.geLoad === 'function') window.geLoad();
+        }
+      } catch(syncErr) { console.warn('Sync ge_notes échouée:', syncErr); }
+
       const toast = document.getElementById('prof-toast');
-      if (toast) { toast.style.display=''; toast.textContent='✅ Notes enregistrées !'; setTimeout(()=>toast.style.display='none',3000); }
+      if (toast) { toast.style.display=''; toast.textContent='✅ Notes enregistrées !'; setTimeout(()=>toast.style.display='none',3500); }
     };
   }
 
@@ -9960,7 +10793,6 @@ window.ntSwitchTab = function(tab) {
       btn.style.border = t===tab ? '1.5px solid var(--gold)' : '1.5px solid var(--gray-200)';
     }
   });
-  if (tab==='notes') ntLoadNotesSelects();
   if (tab==='classes') ntRenderClasses();
   if (tab==='profs') ntRenderProfs();
 };
@@ -10086,118 +10918,12 @@ window.ntDeleteClasse = async function(id) {
   ntRenderClasses();
 };
 
-// ── CONSULTER LES NOTES (depuis ge_notes localStorage) ───
-function ntLoadNotesSelectsFromGE() {
-  const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
-  const geNotes   = JSON.parse(localStorage.getItem('ge_notes') || '{}');
-
-  const clsSel = document.getElementById('nt-view-classe');
-  const matSel = document.getElementById('nt-view-matiere');
-  if (!clsSel || !matSel) return;
-
-  // Classes depuis ge_etudiants
-  const classes = [...new Set(etudiants.map(e => (e.classe || e.option || '').trim()).filter(Boolean))].sort();
-  clsSel.innerHTML = '<option value="">— Choisir —</option>' + classes.map(c => `<option value="${c}">${c}</option>`).join('');
-
-  // Matières depuis ge_notes (toutes les clés de matières présentes)
-  const mats = new Set();
-  Object.values(geNotes).forEach(periodes => {
-    if (!periodes) return;
-    Object.values(periodes).forEach(matiereMap => {
-      if (!matiereMap) return;
-      Object.keys(matiereMap).forEach(m => mats.add(m));
-    });
-  });
-  // Aussi depuis GE_MATIERES si disponible
-  if (typeof GE_MATIERES !== 'undefined') GE_MATIERES.forEach(m => mats.add(m));
-  // Labels lisibles
-  const getLabel = m => {
-    if (typeof GE_MATIERE_LABELS !== 'undefined' && GE_MATIERE_LABELS[m]) return GE_MATIERE_LABELS[m];
-    return m.replace(/_/g,' ').replace(/\b\w/g, l => l.toUpperCase());
-  };
-  matSel.innerHTML = '<option value="">— Choisir —</option>' + [...mats].sort().map(m => `<option value="${m}">${getLabel(m)}</option>`).join('');
-}
-
-window.ntLoadNotesView = function() {
-  const classe  = document.getElementById('nt-view-classe')?.value;
-  const matiere = document.getElementById('nt-view-matiere')?.value;
-  const periode = document.getElementById('nt-view-periode')?.value;
-  const tbody   = document.getElementById('nt-notes-tbody');
-  const stats   = document.getElementById('nt-notes-stats');
-  if (!tbody) return;
-  if (!classe || !matiere) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--gray-400)">Choisissez une classe et une matière.</td></tr>';
-    if (stats) stats.textContent = '';
-    return;
-  }
-
-  const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
-  const geNotes   = JSON.parse(localStorage.getItem('ge_notes') || '{}');
-  const eleves    = etudiants.filter(e => (e.classe || e.option || '').trim() === classe);
-
-  if (!eleves.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--gray-400)">Aucun élève dans cette classe.</td></tr>';
-    if (stats) stats.textContent = ''; return;
-  }
-
-  // Détecter primaire (même logique que geIsPrimaire)
-  const isPrim = (function(c) {
-    if (!c) return false;
-    const cl = c.trim().toLowerCase();
-    if (/\b(cp[12]?|ce[12]?|cm[12]?)\b/i.test(cl)) return true;
-    if (/\bcours\s*(préparatoire|elementaire|élémentaire|moyen)\b/i.test(cl)) return true;
-    if (/^(1[eèê]re?|[2-6][eèê]me?)\s*(ann[eé]e?)?/i.test(cl) && !/\b(coll[eè]ge|lyc[eé]e|seconde|terminal|terminale|bac)\b/i.test(cl)) return true;
-    return false;
-  })(classe);
-
-  const noteMax = isPrim ? 10 : 20;
-  const seuil   = isPrim ? 5  : 10;
-
-  const getMention = n => {
-    if (n === null) return '—';
-    if (isPrim) {
-      if (n >= 9)  return '🌟 Très Bien';
-      if (n >= 8)  return '✅ Bien';
-      if (n >= 6)  return '👍 Assez Bien';
-      if (n >= 5)  return '📘 Passable';
-      return '❌ Insuffisant';
-    }
-    if (n >= 16) return '🌟 Très Bien';
-    if (n >= 14) return '✅ Bien';
-    if (n >= 12) return '👍 Assez Bien';
-    if (n >= 10) return '📘 Passable';
-    return '❌ Insuffisant';
-  };
-
-  let total = 0, count = 0;
-  tbody.innerHTML = eleves.map((e, i) => {
-    const noteVal = geNotes[e.matricule]?.[periode]?.[matiere];
-    const note = (noteVal !== undefined && noteVal !== null && noteVal !== '') ? parseFloat(noteVal) : null;
-    if (note !== null) { total += note; count++; }
-    const couleur = note !== null ? (note >= seuil ? 'var(--success)' : 'var(--danger)') : 'var(--gray-400)';
-    return `<tr>
-      <td style="padding:10px 14px;color:var(--gray-400);font-size:12px">${i+1}</td>
-      <td style="padding:10px 14px;font-weight:600;color:var(--navy)">${e.nom} ${e.prenom}</td>
-      <td style="padding:10px 14px;font-size:12px;color:var(--gray-600)">${e.classe || e.option || '—'}</td>
-      <td style="padding:10px 14px;text-align:center;font-weight:700;color:${couleur}">${note !== null ? note + '/' + noteMax : '—'}</td>
-      <td style="padding:10px 14px;font-size:12px">${getMention(note)}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--gray-400);padding:20px">Aucune donnée</td></tr>';
-
-  if (stats) {
-    const label = isPrim ? `🏫 Primaire /10 — seuil 5` : `📊 /20 — seuil 10`;
-    stats.textContent = count > 0
-      ? `${label} · Moyenne : ${(total/count).toFixed(2)}/${noteMax} — ${count} note(s) sur ${eleves.length} élève(s)`
-      : `Aucune note saisie pour cette sélection.`;
-  }
-};
-
+// ── Init quand page Notes ouverte ─────────────────────────
 // ── Init quand page Notes ouverte ─────────────────────────
 const _gpOrig = window.gpShowPage;
 if (typeof window.gpShowPage === 'function') {
   window.gpShowPage = function(id, el) {
     _gpOrig(id, el);
-    if (id === 'gp-notes') { ntLoadNotesSelectsFromGE(); }
   };
 }
 
@@ -10205,13 +10931,16 @@ if (typeof window.gpShowPage === 'function') {
 // Regroupe les élèves par classe et met à jour Firestore
 window.geSyncEtudiantsToFirestore = async function() {
   try {
-    const etudiants = JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
+    // Utiliser la variable globale geEtudiants (déjà chargée depuis Firestore)
+    const etudiants = (typeof geEtudiants !== 'undefined' && geEtudiants.length)
+      ? geEtudiants
+      : JSON.parse(localStorage.getItem('ge_etudiants') || '[]');
     // Regrouper par classe
     const parClasse = {};
     etudiants.forEach(e => {
       const cl = (e.classe || e.option || 'Sans classe').trim();
       if (!parClasse[cl]) parClasse[cl] = [];
-      parClasse[cl].push(`${e.nom} ${e.prenom}`.trim());
+      parClasse[cl].push({ nom: `${e.nom} ${e.prenom}`.trim(), matricule: e.matricule || '' });
     });
     // Lire les classes existantes dans Firestore
     const snap = await getDocs(collection(db, 'notes_classes'));
@@ -10231,3 +10960,6 @@ window.geSyncEtudiantsToFirestore = async function() {
   }
 };
 
+</script>
+</body>
+</html>
