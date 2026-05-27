@@ -4512,10 +4512,14 @@ function renderPersonnelTable() {
 function deletePersonnel(id) {
   if (!confirm('Supprimer cet agent ?')) return;
   personnel = personnel.filter(a => a.id !== id);
+  // Pause le listener onSnapshot pour éviter que Firestore réinjecte l'ancien état
+  window._geSuppressListener = true;
   localStorage.setItem('mpua_personnel', JSON.stringify(personnel));
   renderPersonnelTable();
   updateDashboard();
   showToast('🗑️ Agent supprimé.');
+  // Réactiver le listener après que Firestore a confirmé l'écriture
+  setTimeout(() => { window._geSuppressListener = false; }, 3000);
 }
 
 function editPersonnel(id) {
@@ -6373,6 +6377,7 @@ window._geStartNotesListener = function() {
       window._fsCollection(db, 'notes_saisies'),
       async (snap) => {
         if (!snap || (snap.metadata && snap.metadata.hasPendingWrites)) return;
+        if (window._geSuppressListener) return;
         await window.geSyncNotesFromFirestore();
         const activePage = document.querySelector('.ge-page.ge-active');
         if (!activePage) return;
