@@ -261,8 +261,6 @@ window._fsLoadPromise = (async () => {
         if (typeof geLoad === 'function') geLoad();
       });
     }
-    // Sync initiale : tous les élèves existants → personnel
-    if (typeof geSyncTousEtudiantsVersPersonnel === 'function') geSyncTousEtudiantsVersPersonnel();
     if (typeof renderPersonnelTable === 'function') renderPersonnelTable();
     if (typeof updateDashboard === 'function') updateDashboard();
     if (typeof initPlatform === 'function') {
@@ -6518,8 +6516,7 @@ function geSaveEtudiant() {
   updateWelcomeKPIs();
   // Sync vers l'interface professeur
   if (typeof window.geSyncEtudiantsToFirestore === 'function') window.geSyncEtudiantsToFirestore();
-  // Sync vers Gestion du Personnel
-  geSyncEtudiantVersPersonnel(etud);
+
   // Rafraîchir la fiche si elle est active
   if(document.getElementById('ge-fiche-eleve')?.classList.contains('ge-active')) geFicheInitSelects();
 }
