@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interface Professeur — Saisie des notes</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; background:#faf8f4; color:#1a1410; min-height:100vh; }
+  select, input { font-family:'DM Sans',sans-serif; }
+</style>
+</head>
+<body>
+
+<div id="app" style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
+  <div style="font-size:36px">⏳</div>
+  <div style="font-size:15px;color:#5a4f45">Chargement…</div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getFirestore, doc, getDoc, getDocs, setDoc, collection
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDAcvBzEHC8u-2UecnpzvgsSQzQXDXNR5k",
+  authDomain: "gestion-scolaire-f8322.firebaseapp.com",
+  projectId: "gestion-scolaire-f8322",
+  storageBucket: "gestion-scolaire-f8322.firebasestorage.app",
+  messagingSenderId: "215269084526",
+  appId: "1:215269084526:web:975fc325a8750cfe70057f"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// ── Lire l'ID prof depuis l'URL (?prof=ID) ────────────────
+const profId = new URLSearchParams(window.location.search).get('prof');
+
+if (!profId) {
+  document.getElementById('app').innerHTML = `
+    <div style="font-size:48px">🔒</div>
+    <div style="font-size:18px;color:#0d2137;font-weight:700">Lien invalide</div>
+    <div style="font-size:13px;color:#a09080">Aucun identifiant professeur dans le lien.</div>`;
+} else {
+  lancerInterfaceProf(profId);
+}
+
+// ══════════════════════════════════════════════════════════
+//  INTERFACE PROFESSEUR
+// ══════════════════════════════════════════════════════════
+async function lancerInterfaceProf(profId) {
+  const profSnap = await getDoc(doc(db, 'notes_profs', profId));
+  if (!profSnap.exists()) {
+    document.getElementById('app').innerHTML = `
+      <div style="font-size:48px">🔒</div>
+      <div style="font-size:18px;color:#0d2137;font-weight:700">Lien invalide ou expiré</div>
+      <div style="font-size:13px;color:#a09080">Contactez l'administration.</div>`;
+    return;
+  }
+
+  const prof = profSnap.data();
+  const profClasses  = prof.classes  ? prof.classes.split(',').map(c=>c.trim()).filter(Boolean)  : [];
+  const profMatieres = prof.matieres ? prof.matieres.split(',').map(m=>m.trim()).filter(Boolean) : [];
+
+  let selectedClasse  = profClasses[0]  || '';
+  let selectedMatiere = profMatieres[0] || '';
+  let selectedPeriode = 'T1';
+  let allClasses = {};
+
+  // Charger toutes les classes
+  const clsSnap = await getDocs(collection(db, 'notes_classes'));
+  clsSnap.forEach(d => { allClasses[d.id] = d.data(); });
+
+  async function render() {
+    // ── Trouver les élèves de la classe sélectionnée ──────
+    let elevesRaw = [];
+    for (const v of Object.values(allClasses)) {
+      if (v.nom === selectedClasse) { elevesRaw = v.eleves || []; break; }
+    }
+    const eleves = elevesRaw.map(el =>
+      typeof el === 'string' ? { nom: el, matricule: '' } : { nom: el.nom || '', matricule: el.matricule || '' }
+    );
+
+    // ── Détection primaire (/10) ou secondaire (/20) ──────
+    const _isPrim = (function(c) {
+      if (!c) return false;
+      const cl = c.trim().toLowerCase();
+      if (/\b(cp[12]?|ce[12]?|cm[12]?)\b/i.test(cl)) return true;
+      if (/\bcours\s*(préparatoire|elementaire|élémentaire|moyen)\b/i.test(cl)) return true;
+      if (/^(1[eèê]re?|[2-6][eèê]me?)\s*(ann[eé]e?)?/i.test(cl) && !/\b(coll[eè]ge|lyc[eé]e|seconde|terminal|terminale|bac)\b/i.test(cl)) return true;
+      return false;
+    })(selectedClasse);
+
+    const _noteMax  = _isPrim ? 10 : 20;
+    const _noteStep = _isPrim ? 0.5 : 0.25;
+    const _niveauBadge = _isPrim
+      ? `<span style="background:#e8f5e9;color:#2d7a4f;border-radius:8px;padding:3px 10px;font-size:11px;font-weight:700">🎒 Primaire — /10</span>`
+      : `<span style="background:#e3f0ff;color:#1a56b0;border-radius:8px;padding:3px 10px;font-size:11px;font-weight:700">🏫 Secondaire — /20</span>`;
+
+    document.body.innerHTML = `
+    <div style="font-family:'DM Sans',sans-serif;background:#faf8f4;min-height:100vh;padding:0 0 40px">
+
+      <!-- HEADER -->
+      <div style="background:#0d2137;color:white;padding:16px 24px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 12px rgba(0,0,0,.3)">
+        <span style="font-size:28px">📒</span>
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:18px;font-weight:700">Bienvenue, ${prof.nom} 👋</div>
+          <div style="font-size:12px;opacity:.75">Saisie des notes${profMatieres.length ? ' · ' + profMatieres.join(', ') : ''}</div>
+        </div>
+      </div>
+
+      <div style="max-width:900px;margin:24px auto;padding:0 16px">
+
+        <!-- ENCART ENGAGEMENT -->
+        <div style="background:linear-gradient(135deg,#fff8e1,#fffde7);border:1.5px solid #f9c74f;border-left:5px solid #c9922a;border-radius:10px;padding:14px 18px;margin-bottom:20px;display:flex;align-items:flex-start;gap:12px;">
+          <span style="font-size:22px;flex-shrink:0">🎓</span>
+          <div>
+            <div style="font-weight:700;color:#7d5a00;font-size:13px;margin-bottom:4px;">Engagement envers les apprenants</div>
+            <div style="font-size:12.5px;color:#5a4500;line-height:1.6;">
+              Cher(e) Professeur(e), les notes que vous saisissez reflètent le travail réel de vos apprenants. Soyez <strong>honnête et impartial(e)</strong> dans votre évaluation — chaque note compte pour leur avenir.
+            </div>
+          </div>
+        </div>
+
+        <!-- SÉLECTEURS -->
+        <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px;align-items:flex-end">
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px">
+            <label style="font-size:12px;color:#5a4f45;font-weight:600">Classe</label>
+            <select id="pf-classe" style="padding:8px 12px;border-radius:8px;border:1.5px solid #e8e4dd;font-size:13px">
+              ${profClasses.map(c=>`<option value="${c}"${c===selectedClasse?' selected':''}>${c}</option>`).join('')}
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px">
+            <label style="font-size:12px;color:#5a4f45;font-weight:600">Matière</label>
+            <select id="pf-matiere" style="padding:8px 12px;border-radius:8px;border:1.5px solid #e8e4dd;font-size:13px">
+              ${profMatieres.map(m=>`<option value="${m}"${m===selectedMatiere?' selected':''}>${m}</option>`).join('')}
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px">
+            <label style="font-size:12px;color:#5a4f45;font-weight:600">Période</label>
+            <select id="pf-periode" style="padding:8px 12px;border-radius:8px;border:1.5px solid #e8e4dd;font-size:13px">
+              <option value="T1"${selectedPeriode==='T1'?' selected':''}>1er Trimestre</option>
+              <option value="T2"${selectedPeriode==='T2'?' selected':''}>2ème Trimestre</option>
+              <option value="T3"${selectedPeriode==='T3'?' selected':''}>3ème Trimestre</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:8px">
+            ${_niveauBadge}
+            <button id="btn-charger" style="background:#0d2137;color:white;border:none;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">🔄 Charger</button>
+          </div>
+        </div>
+
+        <!-- TABLEAU ÉLÈVES -->
+        ${eleves.length === 0
+          ? `<div style="background:white;border-radius:14px;padding:32px;text-align:center;color:#a09080;font-size:14px">Aucun élève dans cette classe.<br>Contactez l'administration.</div>`
+          : `<div style="background:white;border-radius:14px;border:1px solid #e8e4dd;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.06)">
+              <div style="background:#0d2137;color:white;padding:12px 20px;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:space-between">
+                <span>📋 ${selectedClasse} — ${selectedMatiere} — ${selectedPeriode==='T1'?'1er':selectedPeriode==='T2'?'2ème':'3ème'} Trimestre</span>
+                <span style="font-size:11px;opacity:.8">${_isPrim?'Barème /10':'Barème /20'}</span>
+              </div>
+              <div style="overflow-x:auto">
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                  <thead>
+                    <tr style="background:#f4f2ee">
+                      <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">N°</th>
+                      <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">ÉLÈVE</th>
+                      <th style="padding:10px 16px;text-align:center;font-size:11px;color:#5a4f45">NOTE /${_noteMax}</th>
+                      <th style="padding:10px 16px;text-align:left;font-size:11px;color:#5a4f45">APPRÉCIATION</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${eleves.map((el,i)=>`
+                    <tr style="border-top:1px solid #f4f2ee">
+                      <td style="padding:10px 16px;color:#a09080;font-size:12px">${i+1}</td>
+                      <td style="padding:10px 16px;font-weight:600;color:#0d2137">${el.nom}</td>
+                      <td style="padding:8px 16px;text-align:center">
+                        <input type="number" id="note-${i}" data-matricule="${el.matricule}" min="0" max="${_noteMax}" step="${_noteStep}" placeholder="—"
+                          style="width:70px;padding:6px 8px;border-radius:8px;border:1.5px solid #e8e4dd;text-align:center;font-size:14px;font-weight:700">
+                      </td>
+                      <td style="padding:8px 16px">
+                        <select id="appr-${i}" style="padding:6px 10px;border-radius:8px;border:1.5px solid #e8e4dd;font-size:12px;width:100%">
+                          <option value="">—</option>
+                          <option value="Très Bien">Très Bien</option>
+                          <option value="Bien">Bien</option>
+                          <option value="Assez Bien">Assez Bien</option>
+                          <option value="Passable">Passable</option>
+                          <option value="Insuffisant">Insuffisant</option>
+                          <option value="Très Insuffisant">Très Insuffisant</option>
+                        </select>
+                      </td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>
+              </div>
+              <div style="padding:16px 20px;display:flex;gap:10px;justify-content:flex-end;border-top:1px solid #f4f2ee">
+                <button id="btn-save" style="background:#c9922a;color:white;border:none;padding:10px 24px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer">
+                  ✓ Enregistrer les notes
+                </button>
+              </div>
+            </div>`}
+
+        <div id="prof-toast" style="display:none;margin-top:16px;background:#2d7a4f;color:white;padding:12px 20px;border-radius:10px;font-weight:600;text-align:center"></div>
+      </div>
+    </div>`;
+
+    // ── Restaurer notes déjà saisies ──────────────────────
+    const _matiereKeyRestore = (_isPrim && selectedMatiere && !selectedMatiere.startsWith('prim_'))
+      ? 'prim_' + selectedMatiere.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'')
+      : selectedMatiere;
+    const noteId = `${profId}_${selectedClasse}_${_matiereKeyRestore}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
+    const savedSnap = await getDoc(doc(db, 'notes_saisies', noteId));
+    if (savedSnap.exists()) {
+      const saved = savedSnap.data();
+      eleves.forEach((el, i) => {
+        const entry = saved[el.matricule] || saved[el.nom] || null;
+        if (entry) {
+          const ni = document.getElementById(`note-${i}`);
+          const ai = document.getElementById(`appr-${i}`);
+          if (ni && entry.note !== undefined) ni.value = entry.note;
+          if (ai) ai.value = entry.appreciation || '';
+        }
+      });
+    }
+
+    // ── Bouton Charger ────────────────────────────────────
+    document.getElementById('btn-charger')?.addEventListener('click', async () => {
+      selectedClasse  = document.getElementById('pf-classe').value;
+      selectedMatiere = document.getElementById('pf-matiere').value;
+      selectedPeriode = document.getElementById('pf-periode').value;
+      await render();
+    });
+
+    // ── Bouton Enregistrer ────────────────────────────────
+    document.getElementById('btn-save')?.addEventListener('click', async () => {
+      const _matiereKey = (_isPrim && selectedMatiere && !selectedMatiere.startsWith('prim_'))
+        ? 'prim_' + selectedMatiere.toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'')
+        : selectedMatiere;
+      const nId = `${profId}_${selectedClasse}_${_matiereKey}_${selectedPeriode}`.replace(/[^a-zA-Z0-9_-]/g,'_');
+      const data = { classe: selectedClasse, matiere: _matiereKey, periode: selectedPeriode, profNom: prof.nom, profId, noteMax: _noteMax };
+      eleves.forEach((el, i) => {
+        const noteVal = document.getElementById(`note-${i}`)?.value;
+        const apprVal = document.getElementById(`appr-${i}`)?.value;
+        if (noteVal !== '' && noteVal !== undefined) {
+          const key = el.matricule || el.nom;
+          data[key] = { note: parseFloat(noteVal), appreciation: apprVal, nom: el.nom, matricule: el.matricule };
+        }
+      });
+      await setDoc(doc(db, 'notes_saisies', nId), data);
+      const toast = document.getElementById('prof-toast');
+      if (toast) { toast.style.display=''; toast.textContent='✅ Notes enregistrées avec succès !'; setTimeout(()=>toast.style.display='none', 3500); }
+    });
+  }
+
+  await render();
+}
+</script>
+</body>
+</html>
